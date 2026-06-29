@@ -242,25 +242,22 @@ function Header() {
             transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
             className="absolute -inset-1 rounded-2xl bg-accent-fuchsia/45 blur-lg"
           />
-          {/* Logo: gif animado en loop con flotación sutil */}
+          {/* Logo: gif animado en loop infinito, sin fondo, con flotación sutil */}
           <motion.div
             animate={{ y: [0, -2.5, 0] }}
             transition={{ duration: 3.2, repeat: Infinity, ease: "easeInOut" }}
-            className="relative flex h-11 w-11 items-center justify-center overflow-hidden rounded-xl border border-white/20 bg-white shadow-glow"
+            className="relative flex h-12 w-12 items-center justify-center"
           >
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src="/logo.gif"
-              alt="SKY logo"
-              className="h-full w-full object-contain"
+              alt="Extractor MetaData logo"
+              className="h-full w-full object-contain drop-shadow-[0_2px_10px_rgba(232,121,249,0.35)]"
             />
           </motion.div>
         </div>
-        <div>
-          <div className="font-display text-lg font-bold tracking-tight text-white">
-            SKY
-          </div>
-          <div className="-mt-1 text-[11px] text-white/40">Metadata Cleaner</div>
+        <div className="font-display text-lg font-bold leading-tight tracking-tight text-white">
+          Extractor MetaData
         </div>
       </div>
       <a
@@ -373,7 +370,7 @@ function Footer() {
   return (
     <footer className="mt-auto border-t border-white/5 pt-6 text-center text-xs text-white/35">
       <p>
-        SKY limpia metadatos de IA preservando la calidad. No elimina marcas de agua
+        Extractor MetaData limpia metadatos de IA preservando la calidad. No elimina marcas de agua
         invisibles a nivel de píxel (p. ej. SynthID). Procesamiento 100% en el navegador.
       </p>
     </footer>

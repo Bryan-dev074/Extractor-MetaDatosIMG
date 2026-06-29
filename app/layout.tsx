@@ -21,9 +21,13 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AURA · Limpiador quirúrgico de metadatos de IA",
+  title: "Extractor MetaData · Limpiador quirúrgico de metadatos de IA",
   description:
     "Elimina rastros de IA (C2PA, XMP, EXIF) de tus imágenes JPEG y PNG sin recomprimir los píxeles ni alterar el color. 100% en tu navegador.",
+  icons: {
+    icon: "/favicon.ico",
+    apple: "/icon-512.png",
+  },
   keywords: [
     "metadatos",
     "C2PA",
@@ -36,9 +40,9 @@ export const metadata: Metadata = {
     "EXIF",
     "XMP",
   ],
-  authors: [{ name: "AURA" }],
+  authors: [{ name: "Extractor MetaData" }],
   openGraph: {
-    title: "SKY · Limpiador quirúrgico de metadatos de IA",
+    title: "Extractor MetaData · Limpiador quirúrgico de metadatos de IA",
     description:
       "Quita las etiquetas de IA de tus imágenes preservando ICC, resolución y calidad. Todo en el navegador.",
     type: "website",

@@ -1,4 +1,4 @@
-# SKY · Limpiador quirúrgico de metadatos de IA
+# Extractor MetaData · Limpiador quirúrgico de metadatos de IA
 
 Aplicación web que elimina **únicamente los rastros que identifican una imagen como "generada por IA"** (manifiestos **C2PA / Content Credentials**, metadatos **XMP / EXIF / IPTC** de Midjourney, DALL·E, Adobe Firefly, Stable Diffusion, ComfyUI, Google Imagen / Gemini / **Nano Banana**, etc.) **conservando intacto el resto del archivo** — en especial el **perfil de color ICC**, la **resolución** y los **píxeles**.
 
@@ -89,7 +89,7 @@ Desde la carpeta del proyecto:
 ```bash
 git init
 git add .
-git commit -m "SKY: limpiador quirúrgico de metadatos de IA"
+git commit -m "Extractor MetaData: limpiador quirúrgico de metadatos de IA"
 git branch -M main
 git remote add origin https://github.com/Bryan-dev074/Extractor-MetaDatosIMG.git
 git push -u origin main
