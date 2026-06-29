@@ -1,0 +1,32 @@
+{
+  "name": "sky-metadata-cleaner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Limpiador quirúrgico de metadatos de IA (C2PA / XMP / EXIF) que preserva la calidad para redes sociales.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "framer-motion": "^11.18.2",
+    "next": "^15.1.6",
+    "pako": "^2.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "@types/pako": "^2.0.3",
+    "@types/react": "^19.0.7",
+    "@types/react-dom": "^19.0.3",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.5.1",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  }
+}
