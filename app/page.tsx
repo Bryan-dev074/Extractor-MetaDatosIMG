@@ -234,39 +234,26 @@ function Header() {
   return (
     <header className="flex items-center justify-between">
       <div className="flex items-center gap-3">
-        <div className="relative flex h-10 w-10 items-center justify-center">
-          {/* Halo de gradiente girando sin parar */}
+        <div className="relative flex h-11 w-11 items-center justify-center">
+          {/* Halo rosa que late, a juego con la Kitty */}
           <motion.span
             aria-hidden
-            animate={{ rotate: 360 }}
-            transition={{ duration: 8, repeat: Infinity, ease: "linear" }}
-            className="absolute -inset-1.5 rounded-2xl opacity-70 blur-md"
-            style={{
-              background:
-                "conic-gradient(from 0deg, #8B5CF6, #22D3EE, #E879F9, #8B5CF6)",
-            }}
+            animate={{ opacity: [0.4, 0.85, 0.4], scale: [1, 1.15, 1] }}
+            transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+            className="absolute -inset-1 rounded-2xl bg-accent-fuchsia/45 blur-lg"
           />
-          {/* Caja del logo con respiración constante */}
+          {/* Logo: gif animado en loop con flotación sutil */}
           <motion.div
-            animate={{ scale: [1, 1.07, 1] }}
-            transition={{ duration: 3.4, repeat: Infinity, ease: "easeInOut" }}
-            className="relative flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-accent-violet to-accent-cyan shadow-glow"
+            animate={{ y: [0, -2.5, 0] }}
+            transition={{ duration: 3.2, repeat: Infinity, ease: "easeInOut" }}
+            className="relative flex h-11 w-11 items-center justify-center overflow-hidden rounded-xl border border-white/20 bg-white shadow-glow"
           >
-            <motion.svg
-              width="22"
-              height="22"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="white"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              animate={{ y: [0, -1.5, 0] }}
-              transition={{ duration: 3.4, repeat: Infinity, ease: "easeInOut" }}
-            >
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" />
-              <path d="m9 12 2 2 4-4" />
-            </motion.svg>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/logo.gif"
+              alt="SKY logo"
+              className="h-full w-full object-contain"
+            />
           </motion.div>
         </div>
         <div>
