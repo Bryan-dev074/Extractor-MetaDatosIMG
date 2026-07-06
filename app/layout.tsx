@@ -24,10 +24,6 @@ export const metadata: Metadata = {
   title: "Extractor MetaData · Limpiador quirúrgico de metadatos de IA",
   description:
     "Elimina rastros de IA (C2PA, XMP, EXIF) de tus imágenes JPEG y PNG sin recomprimir los píxeles ni alterar el color. 100% en tu navegador.",
-  icons: {
-    icon: "/favicon.ico",
-    apple: "/icon-512.png",
-  },
   keywords: [
     "metadatos",
     "C2PA",
