@@ -4,31 +4,41 @@ import { useCallback, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 
 interface DropzoneProps {
-  onFile: (file: File) => void;
+  onFiles: (files: File[]) => void;
   disabled?: boolean;
 }
 
 const ACCEPTED = ["image/jpeg", "image/png"];
 
-export default function Dropzone({ onFile, disabled }: DropzoneProps) {
+function filterValid(list: FileList | null): { ok: File[]; rejected: number } {
+  const ok: File[] = [];
+  let rejected = 0;
+  for (const f of Array.from(list ?? [])) {
+    if (ACCEPTED.includes(f.type) || /\.(jpe?g|png)$/i.test(f.name)) ok.push(f);
+    else rejected++;
+  }
+  return { ok, rejected };
+}
+
+export default function Dropzone({ onFiles, disabled }: DropzoneProps) {
   const [drag, setDrag] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleFiles = useCallback(
-    (files: FileList | null) => {
+    (list: FileList | null) => {
       setError(null);
-      const file = files?.[0];
-      if (!file) return;
-      const okType =
-        ACCEPTED.includes(file.type) || /\.(jpe?g|png)$/i.test(file.name);
-      if (!okType) {
-        setError("Formato no soportado. Usa JPEG o PNG.");
+      const { ok, rejected } = filterValid(list);
+      if (ok.length === 0) {
+        setError("Formato no soportado. Usa imágenes JPEG o PNG.");
         return;
       }
-      onFile(file);
+      if (rejected > 0) {
+        setError(`${rejected} archivo(s) no compatibles se ignoraron (solo JPEG/PNG).`);
+      }
+      onFiles(ok);
     },
-    [onFile],
+    [onFiles],
   );
 
   return (
@@ -81,17 +91,14 @@ export default function Dropzone({ onFile, disabled }: DropzoneProps) {
           ref={inputRef}
           type="file"
           accept="image/jpeg,image/png"
+          multiple
           className="hidden"
           onChange={(e) => handleFiles(e.target.files)}
         />
 
         <div className="relative z-10 flex flex-col items-center gap-5">
           <motion.div
-            animate={
-              drag
-                ? { scale: 1.1, rotate: 0 }
-                : { scale: 1, y: [0, -6, 0] }
-            }
+            animate={drag ? { scale: 1.1, rotate: 0 } : { scale: 1, y: [0, -6, 0] }}
             transition={
               drag
                 ? { type: "spring", stiffness: 300, damping: 18 }
@@ -105,19 +112,20 @@ export default function Dropzone({ onFile, disabled }: DropzoneProps) {
 
           <div className="space-y-2">
             <h3 className="font-display text-xl font-semibold text-white sm:text-2xl">
-              {drag ? "Suelta para escanear" : "Arrastra tu imagen aquí"}
+              {drag ? "Suelta para escanear" : "Arrastra tus imágenes aquí"}
             </h3>
             <p className="text-sm text-white/55">
               o{" "}
               <span className="font-medium text-accent-cyan underline-offset-4 group-hover:underline">
                 haz clic para seleccionar
               </span>{" "}
-              · JPEG o PNG · 100% local, nada se sube a un servidor
+              · <span className="text-white/70">una o varias</span> · JPEG o PNG · 100%
+              local
             </p>
           </div>
 
           <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
-            {["C2PA", "Midjourney", "DALL·E", "Firefly", "Nano Banana"].map((t) => (
+            {["Por lotes", "C2PA", "Midjourney", "DALL·E", "Nano Banana"].map((t) => (
               <span
                 key={t}
                 className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/50"
@@ -135,7 +143,7 @@ export default function Dropzone({ onFile, disabled }: DropzoneProps) {
             initial={{ opacity: 0, y: -6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0 }}
-            className="mt-3 text-center text-sm font-medium text-accent-rose"
+            className="mt-3 text-center text-sm font-medium text-accent-amber"
           >
             {error}
           </motion.p>

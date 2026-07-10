@@ -1,91 +1,149 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import InteractiveBackground from "@/components/InteractiveBackground";
 import Dropzone from "@/components/Dropzone";
-import ImagePreview from "@/components/ImagePreview";
-import MetadataReport from "@/components/MetadataReport";
-import DownloadButton from "@/components/DownloadButton";
-import { cleanImage, cleanFileName, formatBytes } from "@/lib/cleaner";
-import type { CleanResult } from "@/lib/types";
-
-type Status = "idle" | "processing" | "done";
+import ResultCard, { type BatchItem } from "@/components/ResultCard";
+import TikTokInfo from "@/components/TikTokInfo";
+import { cleanImage, cleanFileName } from "@/lib/cleaner";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+const ACCEPTED = ["image/jpeg", "image/png"];
+const isImage = (f: File) =>
+  ACCEPTED.includes(f.type) || /\.(jpe?g|png)$/i.test(f.name);
+
 export default function Home() {
-  const [status, setStatus] = useState<Status>("idle");
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [fileName, setFileName] = useState("");
-  const [result, setResult] = useState<CleanResult | null>(null);
-  const [readout, setReadout] = useState<string[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [items, setItems] = useState<BatchItem[]>([]);
+  const [zipping, setZipping] = useState(false);
+  const idRef = useRef(0);
+  const addInputRef = useRef<HTMLInputElement>(null);
 
-  // Limpia el object URL al desmontar.
-  useEffect(() => {
-    return () => {
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
-    };
-  }, [previewUrl]);
+  const processItem = useCallback(async (it: BatchItem, i: number) => {
+    // Escalona el arranque para que los escáneres no aparezcan todos a la vez.
+    await delay(i * 130);
+    try {
+      const res = await cleanImage(it.file);
+      setItems((prev) =>
+        prev.map((x) =>
+          x.id === it.id
+            ? {
+                ...x,
+                result: res,
+                readout: res.findings.length
+                  ? res.findings.map((f) => f.label)
+                  : ["Sin etiquetas de IA"],
+              }
+            : x,
+        ),
+      );
+      await delay(Math.min(2600, 1000 + res.findings.length * 300));
+      setItems((prev) =>
+        prev.map((x) => (x.id === it.id ? { ...x, status: "done" } : x)),
+      );
+    } catch (e) {
+      setItems((prev) =>
+        prev.map((x) =>
+          x.id === it.id
+            ? {
+                ...x,
+                status: "error",
+                error: e instanceof Error ? e.message : "Error al procesar.",
+              }
+            : x,
+        ),
+      );
+    }
+  }, []);
 
-  const handleFile = useCallback(
-    async (file: File) => {
-      setError(null);
-      setPreviewUrl((old) => {
-        if (old) URL.revokeObjectURL(old);
-        return URL.createObjectURL(file);
-      });
-      setFileName(file.name);
-      setResult(null);
-      setReadout([]);
-      setStatus("processing");
-
-      try {
-        const res = await cleanImage(file);
-        setResult(res);
-        setReadout(
-          res.findings.length
-            ? res.findings.map((f) => f.label)
-            : ["Sin etiquetas de IA · reempaquetando intacto"],
-        );
-        const dur = Math.min(3200, 1200 + res.findings.length * 420);
-        await delay(dur);
-        setStatus("done");
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Error al procesar la imagen.");
-        setStatus("idle");
-      }
+  const addFiles = useCallback(
+    (files: File[]) => {
+      const valid = files.filter(isImage);
+      if (!valid.length) return;
+      const created: BatchItem[] = valid.map((f) => ({
+        id: `it${++idRef.current}`,
+        file: f,
+        name: f.name,
+        previewUrl: URL.createObjectURL(f),
+        status: "processing",
+        readout: [],
+      }));
+      setItems((prev) => [...prev, ...created]);
+      created.forEach((it, i) => processItem(it, i));
     },
-    [],
+    [processItem],
   );
 
-  const download = useCallback(() => {
-    if (!result) return;
-    const blob = new Blob([result.cleaned as BlobPart], { type: result.mime });
+  const downloadOne = useCallback((item: BatchItem) => {
+    if (!item.result) return;
+    const blob = new Blob([item.result.cleaned as BlobPart], {
+      type: item.result.mime,
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = cleanFileName(fileName);
+    a.download = cleanFileName(item.name);
     document.body.appendChild(a);
     a.click();
     a.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 1500);
-  }, [result, fileName]);
-
-  const reset = useCallback(() => {
-    setPreviewUrl((old) => {
-      if (old) URL.revokeObjectURL(old);
-      return null;
-    });
-    setResult(null);
-    setStatus("idle");
-    setReadout([]);
-    setError(null);
-    setFileName("");
   }, []);
 
-  const working = status !== "idle";
+  const removeItem = useCallback((id: string) => {
+    setItems((prev) => {
+      const it = prev.find((x) => x.id === id);
+      if (it) URL.revokeObjectURL(it.previewUrl);
+      return prev.filter((x) => x.id !== id);
+    });
+  }, []);
+
+  const reset = useCallback(() => {
+    setItems((prev) => {
+      prev.forEach((x) => URL.revokeObjectURL(x.previewUrl));
+      return [];
+    });
+  }, []);
+
+  const downloadAll = useCallback(async () => {
+    const done = items.filter((x) => x.status === "done" && x.result);
+    if (!done.length) return;
+    setZipping(true);
+    try {
+      const JSZip = (await import("jszip")).default;
+      const zip = new JSZip();
+      const used = new Set<string>();
+      done.forEach((x, idx) => {
+        let name = cleanFileName(x.name);
+        if (used.has(name)) name = `${idx + 1}-${name}`;
+        used.add(name);
+        zip.file(name, x.result!.cleaned);
+      });
+      const blob = await zip.generateAsync({ type: "blob", compression: "STORE" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "imagenes-limpias.zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+    } finally {
+      setZipping(false);
+    }
+  }, [items]);
+
+  const stats = useMemo(() => {
+    const done = items.filter((x) => x.status === "done");
+    return {
+      total: items.length,
+      doneCount: done.length,
+      findings: done.reduce((s, x) => s + (x.result?.findings.length ?? 0), 0),
+      processing: items.some((x) => x.status === "processing"),
+    };
+  }, [items]);
+
+  const working = items.length > 0;
 
   return (
     <main className="relative min-h-screen overflow-hidden">
@@ -155,12 +213,10 @@ export default function Home() {
                 transition={{ duration: 0.4 }}
                 className="mx-auto max-w-2xl"
               >
-                <Dropzone onFile={handleFile} />
-                {error && (
-                  <p className="mt-4 text-center text-sm font-medium text-accent-rose">
-                    {error}
-                  </p>
-                )}
+                <Dropzone onFiles={addFiles} />
+                <div className="mt-6">
+                  <TikTokInfo />
+                </div>
                 <FeatureRow />
               </motion.div>
             ) : (
@@ -170,57 +226,82 @@ export default function Home() {
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0 }}
                 transition={{ duration: 0.5 }}
-                className="grid gap-6 lg:grid-cols-2"
+                className="space-y-6"
               >
-                {/* Columna izquierda: preview + acciones */}
-                <div className="space-y-4">
-                  {previewUrl && (
-                    <ImagePreview
-                      src={previewUrl}
-                      scanning={status === "processing"}
-                      done={status === "done"}
-                      readout={readout}
-                    />
-                  )}
-
-                  {result && status === "done" && (
-                    <motion.div
-                      initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: 0.2 }}
-                      className="space-y-3"
+                {/* Barra de acciones */}
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="text-sm text-white/60">
+                    <span className="font-display text-lg font-bold text-white">
+                      {stats.total}
+                    </span>{" "}
+                    imagen{stats.total !== 1 ? "es" : ""} ·{" "}
+                    <span className="text-accent-emerald">{stats.findings}</span>{" "}
+                    etiqueta{stats.findings !== 1 ? "s" : ""} de IA eliminada
+                    {stats.findings !== 1 ? "s" : ""}
+                    {stats.processing && (
+                      <span className="ml-2 text-accent-cyan">· procesando…</span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      data-no-ripple
+                      onClick={() => addInputRef.current?.click()}
+                      className="rounded-xl border border-white/[0.12] bg-white/5 px-4 py-2 text-sm font-medium text-white/70 transition-colors hover:border-white/25 hover:text-white"
                     >
-                      <div className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm">
-                        <span className="truncate font-mono text-white/50">
-                          {cleanFileName(fileName)}
-                        </span>
-                        <span className="shrink-0 font-mono text-white/40">
-                          {formatBytes(result.originalSize)} →{" "}
-                          <span className="text-accent-emerald">
-                            {formatBytes(result.cleanedSize)}
-                          </span>
-                        </span>
-                      </div>
-                      <DownloadButton onDownload={download} />
+                      + Añadir
+                    </button>
+                    {stats.doneCount > 1 && (
                       <button
                         data-no-ripple
-                        onClick={reset}
-                        className="w-full rounded-2xl border border-white/10 bg-white/[0.02] px-6 py-3 text-sm font-medium text-white/60 transition-colors hover:border-white/20 hover:text-white"
+                        onClick={downloadAll}
+                        disabled={zipping}
+                        className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-accent-violet to-accent-cyan px-4 py-2 text-sm font-semibold text-white shadow-glow transition-transform hover:scale-[1.02] active:scale-95 disabled:opacity-60"
                       >
-                        Procesar otra imagen
+                        {zipping ? "Comprimiendo…" : "Descargar todo (.zip)"}
                       </button>
-                    </motion.div>
-                  )}
+                    )}
+                    <button
+                      data-no-ripple
+                      onClick={reset}
+                      className="rounded-xl border border-white/[0.12] bg-white/[0.02] px-4 py-2 text-sm font-medium text-white/60 transition-colors hover:border-white/25 hover:text-white"
+                    >
+                      Limpiar todo
+                    </button>
+                  </div>
                 </div>
 
-                {/* Columna derecha: estado / reporte */}
-                <div>
-                  {status === "processing" && <ScanningPanel name={fileName} />}
-                  {status === "done" && result && <MetadataReport result={result} />}
+                <TikTokInfo />
+
+                {/* Grid de resultados */}
+                <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+                  <AnimatePresence>
+                    {items.map((it, i) => (
+                      <ResultCard
+                        key={it.id}
+                        item={it}
+                        index={i}
+                        onDownload={downloadOne}
+                        onRemove={removeItem}
+                      />
+                    ))}
+                  </AnimatePresence>
                 </div>
               </motion.div>
             )}
           </AnimatePresence>
+
+          {/* Input oculto para "Añadir" más imágenes */}
+          <input
+            ref={addInputRef}
+            type="file"
+            accept="image/jpeg,image/png"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              addFiles(Array.from(e.target.files ?? []));
+              e.target.value = "";
+            }}
+          />
         </section>
 
         <Footer />
@@ -284,45 +365,6 @@ function Header() {
         </span>
       </a>
     </header>
-  );
-}
-
-/* ── Panel mientras escanea ──────────────────────────────────────────────── */
-function ScanningPanel({ name }: { name: string }) {
-  return (
-    <div className="glass flex h-full min-h-[260px] flex-col items-center justify-center gap-5 p-8 text-center">
-      <div className="relative h-16 w-16">
-        <span className="absolute inset-0 animate-spin-slow rounded-full border-2 border-transparent border-t-accent-violet border-r-accent-cyan" />
-        <span className="absolute inset-2 animate-spin-slow rounded-full border-2 border-transparent border-b-accent-fuchsia [animation-direction:reverse]" />
-        <span className="absolute inset-0 flex items-center justify-center">
-          <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-accent-cyan shadow-glow-cyan" />
-        </span>
-      </div>
-      <div>
-        <p className="font-display text-lg font-semibold text-white">
-          Análisis quirúrgico en curso
-        </p>
-        <p className="mt-1 max-w-xs font-mono text-xs text-white/45">
-          Inspeccionando segmentos · {name}
-        </p>
-      </div>
-      <div className="flex w-full max-w-xs flex-col gap-2">
-        {["Lectura de bytes", "Detección de firmas de IA", "Purga selectiva", "Preservando ICC + resolución"].map(
-          (s, i) => (
-            <motion.div
-              key={s}
-              initial={{ opacity: 0.3 }}
-              animate={{ opacity: [0.3, 1, 0.3] }}
-              transition={{ duration: 1.6, repeat: Infinity, delay: i * 0.3 }}
-              className="flex items-center gap-2 text-left font-mono text-xs text-white/60"
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-accent-cyan" />
-              {s}
-            </motion.div>
-          ),
-        )}
-      </div>
-    </div>
   );
 }
 

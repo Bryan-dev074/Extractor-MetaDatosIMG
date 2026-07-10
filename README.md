@@ -13,7 +13,9 @@ Todo el procesamiento ocurre **en el navegador (client-side)** mediante manipula
 - **Cirugía a nivel de bytes**: no se decodifica ni se recomprime la imagen. Los segmentos `DQT/DHT/SOF/SOS` (JPEG) y el chunk `IDAT` (PNG) se copian tal cual → **calidad idéntica al original, cero pérdida**.
 - **Detección amplia de IA**: C2PA (JUMBF), XMP de procedencia (IPTC `DigitalSourceType`), tags EXIF (`Software`, `MakerNote`, etc.), chunks de texto PNG (`parameters` de Stable Diffusion, `workflow` de ComfyUI…) y +40 firmas de generadores.
 - **Preservación de calidad**: mantiene **ICC**, **resolución/DPI**, **orientación EXIF** y dimensiones.
-- **UI ultra-premium**: fondo interactivo (malla de nodos con parallax + ondas al hacer clic), efecto de **escáner láser** sobre la vista previa, micro-interacciones a 60fps y panel con el desglose de lo eliminado vs. lo preservado.
+- **Procesamiento por lotes**: arrastra **varias imágenes** a la vez; cada una se escanea en su propia tarjeta y puedes **descargar todo en un `.zip`**.
+- **Export opcional para TikTok**: botón que genera una copia recodificada a **1080p en sRGB** (ver más abajo por qué TikTok necesita esto).
+- **UI ultra-premium**: fondo interactivo (malla de nodos con parallax + ondas al hacer clic), efecto de **escáner láser** sobre cada imagen, micro-interacciones a 60fps y desglose de lo eliminado vs. lo preservado.
 - **Privacidad total**: 0 backend, 0 subida de archivos.
 
 ---
@@ -45,6 +47,18 @@ Tras investigar qué metadatos influyen en cómo se ve una imagen al subirla a r
 ### Bonus de calidad: el C2PA pesa
 
 Un manifiesto C2PA puede ocupar **decenas o cientos de KB**. Instagram aplica un **segundo pase de compresión** si el archivo supera ~1.5 MB; quitar el manifiesto **reduce el peso** y ayuda a evitar ese reprocesado agresivo que arruina la nitidez.
+
+### 📱 TikTok baja la calidad (y no Instagram): por qué y qué hacer
+
+No son los metadatos. El **“Photo Mode” de TikTok recomprime cada imagen en su servidor apuntando a ~100 KB por foto** para que el carrusel cargue rápido en redes lentas — muchísimo más agresivo que Instagram (que permite ~1.5 MB y gestiona el color). Esa recompresión ocurre del lado de TikTok y **ninguna limpieza de metadatos la evita**.
+
+Lo único que ayuda es darle a TikTok el mejor origen posible:
+
+- Subir a **1080 × 1920 px (9:16)** exactos → TikTok se salta su reescalado (la principal causa del emborronado).
+- Usar **sRGB** → TikTok no gestiona bien perfiles de gama amplia (Display P3 / Adobe RGB) y los muestra apagados.
+- Partir de **alta calidad** → mejor origen, resultado más limpio tras su compresión obligatoria.
+
+Por eso cada imagen tiene un botón **“TikTok”** que genera justo eso: una copia recodificada a **1080p, sRGB y calidad ~92%**, lista para subir. (La descarga **“Limpia”** sigue siendo la versión **sin pérdida** para Instagram y demás.)
 
 ### ⚠️ Limitación honesta: marcas de agua invisibles
 
