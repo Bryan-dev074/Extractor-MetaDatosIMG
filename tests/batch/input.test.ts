@@ -54,16 +54,24 @@ type TestEntry = {
   };
 };
 
-function fileEntry(file: File): TestEntry {
+function fileEntry(file: File, delayMs = 0): TestEntry {
   return {
     isFile: true,
     isDirectory: false,
     name: file.name,
-    file: (success) => queueMicrotask(() => success(file)),
+    file: (success) => {
+      if (delayMs > 0) setTimeout(() => success(file), delayMs);
+      else queueMicrotask(() => success(file));
+    },
   };
 }
 
-function directoryEntry(name: string, batches: TestEntry[][], onRead?: () => void): TestEntry {
+function directoryEntry(
+  name: string,
+  batches: TestEntry[][],
+  onRead?: () => void,
+  delayMs = 0,
+): TestEntry {
   return {
     isFile: false,
     isDirectory: true,
@@ -71,7 +79,9 @@ function directoryEntry(name: string, batches: TestEntry[][], onRead?: () => voi
     createReader: () => ({
       readEntries: (success) => {
         onRead?.();
-        queueMicrotask(() => success(batches.shift() ?? []));
+        const batch = batches.shift() ?? [];
+        if (delayMs > 0) setTimeout(() => success(batch), delayMs);
+        else queueMicrotask(() => success(batch));
       },
     }),
   };
@@ -222,12 +232,33 @@ describe("normalizeFiles", () => {
 
   it("makes a reserved single folder root portable", async () => {
     const result = await normalizeFiles(
-      [makeFile("foto.jpg", { webkitRelativePath: "CON.archivo/foto.jpg" })],
+      [makeFile("foto.jpg", { webkitRelativePath: "CON.archivo. /foto.jpg" })],
       "folder",
     );
 
     expect(result.archiveBase).toBe("_CON.archivo");
   });
+
+  it("uses the shared portable-segment rules for invalid and trailing root names", async () => {
+    const result = await normalizeFiles(
+      [makeFile("foto.jpg", { webkitRelativePath: "AUX<>. /foto.jpg" })],
+      "folder",
+    );
+
+    expect(result.archiveBase).toBe("AUX__");
+  });
+
+  it.each(["\u0000", "\u001f", "\u0085"])(
+    "rejects a %s control-bearing folder root as an archive base",
+    async (control) => {
+      const result = await normalizeFiles(
+        [makeFile("foto.jpg", { webkitRelativePath: `Raíz${control}/foto.jpg` })],
+        "folder",
+      );
+
+      expect(result.archiveBase).toBe("imagenes-procesadas");
+    },
+  );
 });
 
 describe("readDroppedItems", () => {
@@ -270,6 +301,77 @@ describe("readDroppedItems", () => {
     const result = await readDroppedItems(droppedItems([{ entry: empty }]));
 
     expect(result).toEqual({ archiveBase: "Vacía", accepted: [], skipped: [] });
+  });
+
+  it("keeps same-named dropped roots distinct using stable item order", async () => {
+    const first = directoryEntry(
+      "Fotos",
+      [[fileEntry(makeFile("foto.bin", { bytes: JPEG_HEADER }), 15)], []],
+      undefined,
+      10,
+    );
+    const second = directoryEntry(
+      "Fotos",
+      [[fileEntry(makeFile("foto.bin", { bytes: PNG_HEADER }))], []],
+    );
+
+    const result = await readDroppedItems(
+      droppedItems([{ entry: first }, { entry: second }]),
+    );
+
+    expect(result.archiveBase).toBe("imagenes-procesadas");
+    expect(result.accepted.map(({ relativePath, format }) => ({ relativePath, format }))).toEqual([
+      { relativePath: "Fotos (2)/foto.bin", format: "png" },
+      { relativePath: "Fotos/foto.bin", format: "jpeg" },
+    ]);
+    expect(new Set(result.accepted.map((item) => item.relativePath))).toHaveLength(2);
+  });
+
+  it("chooses the same duplicate winner regardless of callback completion order", async () => {
+    const run = async (firstDelay: number, secondDelay: number) => {
+      const jpeg = makeFile("igual.bin", { bytes: JPEG_HEADER, lastModified: 77 });
+      const png = makeFile("igual.bin", { bytes: PNG_HEADER, lastModified: 77 });
+      const root = directoryEntry(
+        "Orden",
+        [[fileEntry(jpeg, firstDelay), fileEntry(png, secondDelay)], []],
+      );
+      return readDroppedItems(droppedItems([{ entry: root }]));
+    };
+
+    const slowFirst = await run(15, 0);
+    const fastFirst = await run(0, 15);
+
+    expect(slowFirst.accepted).toEqual([
+      expect.objectContaining({ relativePath: "Orden/igual.bin", format: "jpeg" }),
+    ]);
+    expect(fastFirst.accepted).toEqual([
+      expect.objectContaining({ relativePath: "Orden/igual.bin", format: "jpeg" }),
+    ]);
+    expect(slowFirst.skipped).toEqual(fastFirst.skipped);
+  });
+
+  it("reports a directory-reader callback error without rejecting the selection", async () => {
+    const brokenDirectory: TestEntry = {
+      isFile: false,
+      isDirectory: true,
+      name: "Inaccesible",
+      createReader: () => ({
+        readEntries: (_success, error) => {
+          queueMicrotask(() => error?.(new DOMException("Lector bloqueado")));
+        },
+      }),
+    };
+
+    const result = await readDroppedItems(droppedItems([{ entry: brokenDirectory }]));
+
+    expect(result.archiveBase).toBe("Inaccesible");
+    expect(result.accepted).toEqual([]);
+    expect(result.skipped).toEqual([
+      expect.objectContaining({
+        relativePath: "Inaccesible",
+        reason: expect.stringMatching(/Lector bloqueado/),
+      }),
+    ]);
   });
 
   it("combines multiple dropped roots deterministically and reports entry read errors", async () => {

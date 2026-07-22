@@ -1,13 +1,28 @@
 import { detectImageFormat, type SupportedFormat } from "../metadata/format";
 import { MAX_INPUT_BYTES } from "../metadata/limits";
+import { sanitizeArchiveSegment } from "./archive-path";
 import type { InputImage, InputSelection, InputSource, SkippedInput } from "./types";
 
 const FALLBACK_ARCHIVE_BASE = "imagenes-procesadas";
-const RESERVED_WINDOWS_BASENAME = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
 
 interface Candidate {
   file: File;
+  ordinal: number;
   relativePath: string;
+}
+
+interface CandidateDraft {
+  file: File;
+  relativePath: string;
+}
+
+interface RankedSkipped extends SkippedInput {
+  ordinal: number;
+}
+
+interface EntryResult {
+  candidates: CandidateDraft[];
+  skipped: SkippedInput[];
 }
 
 interface BrowserFileEntry {
@@ -39,12 +54,6 @@ type BrowserFileSystemEntry = BrowserFileEntry | BrowserDirectoryEntry;
 type EntryDataTransferItem = Pick<DataTransferItem, "kind" | "getAsFile"> & {
   webkitGetAsEntry?: () => BrowserFileSystemEntry | null;
 };
-
-interface CollectedEntries {
-  candidates: Candidate[];
-  folderRoots: string[];
-  skipped: SkippedInput[];
-}
 
 function normalizedPath(path: string): string {
   return path.replace(/\\/g, "/").normalize("NFC");
@@ -87,13 +96,15 @@ function errorMessage(error: unknown): string {
 }
 
 function safeArchiveBase(root: string): string {
-  const portable = root
-    .normalize("NFC")
-    .replace(/[<>:"|?*]/g, "_")
-    .replace(/[. ]+$/u, "");
-  if (!portable) return FALLBACK_ARCHIVE_BASE;
-  const deviceBasename = portable.split(".", 1)[0];
-  return RESERVED_WINDOWS_BASENAME.test(deviceBasename) ? `_${portable}` : portable;
+  try {
+    return sanitizeArchiveSegment(root);
+  } catch {
+    return FALLBACK_ARCHIVE_BASE;
+  }
+}
+
+function firstPathSegment(path: string): string {
+  return normalizedPath(path).split("/").filter(Boolean)[0] ?? "";
 }
 
 function archiveBaseFor(
@@ -105,17 +116,20 @@ function archiveBaseFor(
     ...candidates.map((candidate) => candidate.relativePath),
     ...skipped.map((item) => item.relativePath),
   ];
-  const roots = new Set(folderRoots.map((root) => normalizedPath(root).split("/")[0]));
-  const knownFolderRoots = new Set(roots);
-  let hasLooseFile = false;
 
+  if (folderRoots.length > 0) {
+    if (folderRoots.length !== 1) return FALLBACK_ARCHIVE_BASE;
+    const onlyRoot = normalizedPath(folderRoots[0]);
+    const containsLooseFile = paths.some((path) => firstPathSegment(path) !== onlyRoot);
+    return containsLooseFile ? FALLBACK_ARCHIVE_BASE : safeArchiveBase(onlyRoot);
+  }
+
+  const roots = new Set<string>();
+  let hasLooseFile = false;
   for (const path of paths) {
     const segments = normalizedPath(path).split("/").filter(Boolean);
-    if (segments.length < 2) {
-      if (!knownFolderRoots.has(segments[0])) hasLooseFile = true;
-    } else {
-      roots.add(segments[0]);
-    }
+    if (segments.length < 2) hasLooseFile = true;
+    else roots.add(segments[0]);
   }
 
   if (!hasLooseFile && roots.size === 1) return safeArchiveBase(Array.from(roots)[0]);
@@ -164,14 +178,19 @@ async function normalizeCandidates(
         compareByRelativePath(left, right) ||
         compareText(left.file.name, right.file.name) ||
         left.file.size - right.file.size ||
-        left.file.lastModified - right.file.lastModified
+        left.file.lastModified - right.file.lastModified ||
+        left.ordinal - right.ordinal
       );
     });
-  const archiveBase = archiveBaseFor(normalizedCandidates, initialSkipped, folderRoots);
-  const uniqueCandidates: Candidate[] = [];
-  const skipped = initialSkipped.map((item) => ({
+  const normalizedSkipped = initialSkipped.map((item) => ({
     ...item,
     relativePath: normalizedPath(item.relativePath),
+  }));
+  const archiveBase = archiveBaseFor(normalizedCandidates, normalizedSkipped, folderRoots);
+  const uniqueCandidates: Candidate[] = [];
+  const skipped: RankedSkipped[] = normalizedSkipped.map((item, index) => ({
+    ...item,
+    ordinal: candidates.length + index,
   }));
   const seen = new Set<string>();
 
@@ -179,6 +198,7 @@ async function normalizeCandidates(
     const id = fingerprint(candidate);
     if (seen.has(id)) {
       skipped.push({
+        ordinal: candidate.ordinal,
         relativePath: candidate.relativePath,
         reason: "Archivo duplicado: ya se agregó la misma ruta, tamaño y fecha de modificación.",
       });
@@ -188,24 +208,39 @@ async function normalizeCandidates(
     }
   }
 
-  const classified = await Promise.all(uniqueCandidates.map(classify));
-  const accepted: InputImage[] = [];
-  for (const item of classified) {
-    if ("format" in item) accepted.push(item);
-    else skipped.push(item);
+  const classified = await Promise.all(
+    uniqueCandidates.map(async (candidate) => ({ candidate, result: await classify(candidate) })),
+  );
+  const accepted: Array<{ ordinal: number; value: InputImage }> = [];
+  for (const { candidate, result } of classified) {
+    if ("format" in result) accepted.push({ ordinal: candidate.ordinal, value: result });
+    else skipped.push({ ...result, ordinal: candidate.ordinal });
   }
 
-  accepted.sort(compareByRelativePath);
-  skipped.sort((left, right) => compareByRelativePath(left, right) || compareText(left.reason, right.reason));
-  return { archiveBase, accepted, skipped };
+  accepted.sort((left, right) => {
+    return compareByRelativePath(left.value, right.value) || left.ordinal - right.ordinal;
+  });
+  skipped.sort((left, right) => {
+    return (
+      compareByRelativePath(left, right) ||
+      compareText(left.reason, right.reason) ||
+      left.ordinal - right.ordinal
+    );
+  });
+  return {
+    archiveBase,
+    accepted: accepted.map((item) => item.value),
+    skipped: skipped.map(({ ordinal: _ordinal, ...item }) => item),
+  };
 }
 
 export async function normalizeFiles(
   files: Iterable<File>,
   source: InputSource,
 ): Promise<InputSelection> {
-  const candidates = Array.from(files, (file): Candidate => ({
+  const candidates = Array.from(files, (file, ordinal): Candidate => ({
     file,
+    ordinal,
     relativePath:
       source === "folder" && file.webkitRelativePath
         ? file.webkitRelativePath
@@ -238,54 +273,104 @@ function readEntryBatch(reader: BrowserDirectoryReader): Promise<BrowserFileSyst
   });
 }
 
+async function readAllDirectoryEntries(
+  reader: BrowserDirectoryReader,
+): Promise<BrowserFileSystemEntry[]> {
+  const indexed: Array<{ entry: BrowserFileSystemEntry; ordinal: number }> = [];
+  while (true) {
+    const batch = await readEntryBatch(reader);
+    if (batch.length === 0) break;
+    for (const entry of batch) indexed.push({ entry, ordinal: indexed.length });
+  }
+  indexed.sort((left, right) => {
+    return compareText(left.entry.name, right.entry.name) || left.ordinal - right.ordinal;
+  });
+  return indexed.map(({ entry }) => entry);
+}
+
+function mergeEntryResults(results: EntryResult[]): EntryResult {
+  return {
+    candidates: results.flatMap((result) => result.candidates),
+    skipped: results.flatMap((result) => result.skipped),
+  };
+}
+
 async function collectEntry(
   entry: BrowserFileSystemEntry,
   parentPath: string,
-  collection: CollectedEntries,
-): Promise<void> {
-  const relativePath = joinEntryPath(parentPath, entry.name);
+  rootPath?: string,
+): Promise<EntryResult> {
+  const relativePath = rootPath ?? joinEntryPath(parentPath, entry.name);
   if (entry.isFile) {
     try {
-      collection.candidates.push({ file: await readEntryFile(entry), relativePath });
+      return {
+        candidates: [{ file: await readEntryFile(entry), relativePath }],
+        skipped: [],
+      };
     } catch (error) {
-      collection.skipped.push({
-        relativePath,
-        reason: `No se pudo leer el archivo: ${errorMessage(error)}.`,
-      });
+      return {
+        candidates: [],
+        skipped: [
+          { relativePath, reason: `No se pudo leer el archivo: ${errorMessage(error)}.` },
+        ],
+      };
     }
-    return;
   }
 
   let reader: BrowserDirectoryReader;
   try {
     reader = entry.createReader();
   } catch (error) {
-    collection.skipped.push({
-      relativePath,
-      reason: `No se pudo abrir la carpeta: ${errorMessage(error)}.`,
-    });
-    return;
+    return {
+      candidates: [],
+      skipped: [
+        { relativePath, reason: `No se pudo abrir la carpeta: ${errorMessage(error)}.` },
+      ],
+    };
   }
 
-  while (true) {
-    let batch: BrowserFileSystemEntry[];
-    try {
-      batch = await readEntryBatch(reader);
-    } catch (error) {
-      collection.skipped.push({
-        relativePath,
-        reason: `No se pudo leer la carpeta: ${errorMessage(error)}.`,
-      });
-      return;
-    }
-    if (batch.length === 0) return;
-    await Promise.all(batch.map((child) => collectEntry(child, relativePath, collection)));
+  try {
+    const children = await readAllDirectoryEntries(reader);
+    const results = await Promise.all(
+      children.map((child) => collectEntry(child, relativePath)),
+    );
+    return mergeEntryResults(results);
+  } catch (error) {
+    return {
+      candidates: [],
+      skipped: [
+        { relativePath, reason: `No se pudo leer la carpeta: ${errorMessage(error)}.` },
+      ],
+    };
   }
 }
 
+function rootCollisionKey(root: string): string {
+  return root.normalize("NFC").toLocaleLowerCase("en-US");
+}
+
+function reserveDroppedRoot(name: string, used: Set<string>): string {
+  let base: string;
+  try {
+    base = sanitizeArchiveSegment(name);
+  } catch {
+    base = "carpeta";
+  }
+
+  let sequence = 1;
+  let candidate = base;
+  while (used.has(rootCollisionKey(candidate))) {
+    sequence += 1;
+    candidate = `${base} (${sequence})`;
+  }
+  used.add(rootCollisionKey(candidate));
+  return candidate;
+}
+
 export async function readDroppedItems(items: DataTransferItemList): Promise<InputSelection> {
-  const collection: CollectedEntries = { candidates: [], folderRoots: [], skipped: [] };
-  const pending: Promise<void>[] = [];
+  const folderRoots: string[] = [];
+  const pending: Array<Promise<EntryResult>> = [];
+  const usedRoots = new Set<string>();
 
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index] as EntryDataTransferItem | undefined;
@@ -299,17 +384,47 @@ export async function readDroppedItems(items: DataTransferItemList): Promise<Inp
     }
 
     if (entry) {
-      if (entry.isDirectory) collection.folderRoots.push(entry.name);
-      pending.push(collectEntry(entry, "", collection));
+      if (entry.isDirectory) {
+        const root = reserveDroppedRoot(entry.name, usedRoots);
+        folderRoots.push(root);
+        pending.push(collectEntry(entry, "", root));
+      } else {
+        pending.push(collectEntry(entry, ""));
+      }
       continue;
     }
 
-    const file = item.getAsFile();
-    if (file) collection.candidates.push({ file, relativePath: looseFilePath(file) });
+    try {
+      const file = item.getAsFile();
+      if (file) {
+        pending.push(
+          Promise.resolve({
+            candidates: [{ file, relativePath: looseFilePath(file) }],
+            skipped: [],
+          }),
+        );
+      }
+    } catch (error) {
+      pending.push(
+        Promise.resolve({
+          candidates: [],
+          skipped: [
+            {
+              relativePath: `elemento-${index + 1}`,
+              reason: `No se pudo obtener el archivo: ${errorMessage(error)}.`,
+            },
+          ],
+        }),
+      );
+    }
   }
 
-  await Promise.all(pending);
-  return normalizeCandidates(collection.candidates, collection.skipped, collection.folderRoots);
+  const collected = mergeEntryResults(await Promise.all(pending));
+  const candidates = collected.candidates.map((candidate, ordinal) => ({
+    ...candidate,
+    ordinal,
+  }));
+  return normalizeCandidates(candidates, collected.skipped, folderRoots);
 }
 
 export type { InputImage, InputSelection, InputSource, SkippedInput } from "./types";

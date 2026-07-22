@@ -9,7 +9,10 @@ function collisionKey(path: string): string {
   return path.normalize("NFC").toLocaleLowerCase("en-US");
 }
 
-function sanitizeSegment(segment: string): string {
+export function sanitizeArchiveSegment(segment: string): string {
+  if (CONTROL_CHARACTERS.test(segment)) {
+    throw new Error("El segmento contiene caracteres de control no permitidos.");
+  }
   const portable = segment
     .normalize("NFC")
     .replace(WINDOWS_INVALID_CHARACTERS, "_")
@@ -24,10 +27,24 @@ function sourceStem(filename: string): string {
   return lastDot > 0 ? filename.slice(0, lastDot) : filename;
 }
 
-function inferCleanExtension(filename: string): OutputExtension {
-  return filename.toLocaleLowerCase("en-US").endsWith(".png") ? ".png" : ".jpg";
-}
-
+export function createArchivePath(
+  relativePath: string,
+  mode: "clean",
+  used: Set<string>,
+  outputExtension: OutputExtension,
+): string;
+export function createArchivePath(
+  relativePath: string,
+  mode: "tiktok",
+  used: Set<string>,
+  outputExtension?: OutputExtension,
+): string;
+export function createArchivePath(
+  relativePath: string,
+  mode: ArchiveMode,
+  used: Set<string>,
+  outputExtension: OutputExtension,
+): string;
 export function createArchivePath(
   relativePath: string,
   mode: ArchiveMode,
@@ -42,6 +59,12 @@ export function createArchivePath(
   if (normalized.startsWith("/") || /^[A-Za-z]:/.test(normalized)) {
     throw new Error("No se permite una ruta absoluta ni con prefijo de unidad.");
   }
+  if (mode === "clean" && outputExtension === undefined) {
+    throw new Error("La extensión detectada es obligatoria para una salida limpia.");
+  }
+  if (mode === "clean" && outputExtension !== ".jpg" && outputExtension !== ".png") {
+    throw new Error("La extensión limpia debe ser .jpg o .png.");
+  }
 
   const rawSegments = normalized.split("/").filter((segment) => {
     return segment !== "" && segment !== "." && segment !== "..";
@@ -51,9 +74,9 @@ export function createArchivePath(
   }
 
   const rawFilename = rawSegments.pop()!;
-  const directories = rawSegments.map(sanitizeSegment);
-  const stem = sanitizeSegment(sourceStem(rawFilename));
-  const extension = mode === "tiktok" ? ".png" : outputExtension ?? inferCleanExtension(rawFilename);
+  const directories = rawSegments.map(sanitizeArchiveSegment);
+  const stem = sanitizeArchiveSegment(sourceStem(rawFilename));
+  const extension = mode === "tiktok" ? ".png" : outputExtension;
   const label = mode === "tiktok" ? "tiktok" : "limpio";
   const occupied = new Set(Array.from(used, collisionKey));
 
