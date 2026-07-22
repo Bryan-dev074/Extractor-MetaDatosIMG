@@ -281,7 +281,7 @@ git commit -m "fix: harden lossless JPEG and PNG cleaning"
 **Interfaces:**
 - Produces: `normalizeFiles(files: Iterable<File>, source: InputSource): Promise<InputSelection>`
 - Produces: `readDroppedItems(items: DataTransferItemList): Promise<InputSelection>`
-- Produces: `createArchivePath(relativePath: string, mode: "clean" | "tiktok", used: Set<string>, outputExtension?: ".jpg" | ".png"): string`
+- Produces overloads: clean mode requires `outputExtension: ".jpg" | ".png"`; TikTok mode always emits `.png` and needs no extension argument.
 
 `InputSelection` contains deterministic `accepted: InputImage[]` and `skipped: SkippedInput[]`. Classification reads at most the first eight bytes and uses `detectImageFormat`; it never trusts the filename or MIME type. `InputImage` records the detected format so later archive naming can use the real clean output extension.
 
@@ -289,15 +289,15 @@ git commit -m "fix: harden lossless JPEG and PNG cleaning"
 
 ```ts
 it("keeps safe nested directories and renames only the basename", () => {
-  expect(createArchivePath("Campaña/Sub/foto.jpg", "clean", new Set())).toBe(
+  expect(createArchivePath("Campaña/Sub/foto.jpg", "clean", new Set(), ".jpg")).toBe(
     "Campaña/Sub/foto-limpio.jpg",
   );
 });
 
 it("removes traversal and resolves collisions case-insensitively", () => {
   const used = new Set<string>();
-  expect(createArchivePath("../A/CON.jpg", "clean", used)).toBe("A/_CON-limpio.jpg");
-  expect(createArchivePath("a/con.jpg", "clean", used)).toBe("a/_con-limpio (2).jpg");
+  expect(createArchivePath("../A/CON.jpg", "clean", used, ".jpg")).toBe("A/_CON-limpio.jpg");
+  expect(createArchivePath("a/con.jpg", "clean", used, ".jpg")).toBe("a/_con-limpio (2).jpg");
 });
 
 it("uses webkitRelativePath for selected folders", () => {
@@ -318,7 +318,7 @@ Expected: FAIL with missing modules.
 
 - [ ] **Step 3: Implement normalization, recursive dropped entries, and safe names**
 
-`readDroppedItems` must repeatedly call `FileSystemDirectoryReader.readEntries()` until it returns an empty array. Sort accepted and skipped entries by normalized relative path to make UI and reports deterministic. A single selected folder retains its safe root; mixed loose files or multiple folder roots use the deterministic archive label `imagenes-procesadas` while preserving every safe root path within the ZIP.
+`readDroppedItems` must repeatedly call `FileSystemDirectoryReader.readEntries()` until it returns an empty array. Sort accepted and skipped entries by normalized relative path plus a stable source ordinal to make UI, deduplication, and reports independent of callback completion order. A single selected folder retains its safe root; mixed loose files or multiple folder roots use the deterministic archive label `imagenes-procesadas` while preserving every safe root path within the ZIP. Distinct top-level roots with the same safe name are disambiguated deterministically (`Fotos`, `Fotos (2)`) before recursion and still count as multiple roots.
 
 Collision keys use `path.normalize("NFC").toLocaleLowerCase("en-US")`; a loop increments suffixes until the complete path is unique.
 
