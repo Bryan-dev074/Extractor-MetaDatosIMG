@@ -353,6 +353,7 @@ git commit -m "feat: normalize recursive folder inputs"
 - Create: `tests/batch/reducer.test.ts`
 - Create: `tests/batch/queue.test.ts`
 - Create: `tests/batch/worker-pool.test.ts`
+- Create: `tests/batch/use-batch-processor.test.tsx`
 
 **Interfaces:**
 - Consumes: `InputImage`, `cleanBytes`.
@@ -360,6 +361,8 @@ git commit -m "feat: normalize recursive folder inputs"
 - Produces: `createTaskQueue<T, R>({ concurrency, run }): TaskQueue<T, R>`
 - Produces: `createImageWorkerPool({ size, createWorker }): ImageWorkerPool`
 - Produces: `useBatchProcessor(): BatchProcessorApi`
+
+The generic queue owns scheduling only. Each queued task has a stable key and per-task `AbortSignal`; queued cancellation rejects before `run`, while active cancellation aborts the runner and keeps its concurrency slot occupied until the runner settles. `cancelAll` is reusable and `dispose` is terminal. Reject duplicate explicit keys.
 
 - [ ] **Step 1: Write failing stale-result, cancellation, and concurrency tests**
 
@@ -392,7 +395,7 @@ it("never runs more tasks than the concurrency limit", async () => {
 
 - [ ] **Step 2: Verify RED**
 
-Run: `npm test -- tests/batch/reducer.test.ts tests/batch/queue.test.ts`
+Run: `npm test -- tests/batch/reducer.test.ts tests/batch/queue.test.ts tests/batch/worker-pool.test.ts tests/batch/use-batch-processor.test.tsx`
 
 Expected: FAIL with missing reducer/queue.
 
@@ -404,14 +407,20 @@ export type WorkerRequest =
 
 export type WorkerResponse =
   | { id: string; generation: number; ok: true; kind: "clean"; result: CleanResult }
-  | { id: string; generation: number; ok: false; error: string };
+  | { id: string; generation: number; ok: false; kind: "clean"; error: string };
 ```
 
 Task 4 is clean-only so it compiles independently; Task 6 extends this discriminated protocol with TikTok contracts.
 
-Cancellation rejects queued work immediately. For active synchronous work, the pool terminates the owning worker and creates a replacement before accepting new work. Transfer input and output `ArrayBuffer`s rather than cloning them. Generation checks prevent late completion/error/progress dispatch, but are not treated as active cancellation. Worker errors become item errors and do not stop unrelated tasks.
+Create two eager worker slots by default. Each slot owns at most one active request and validates the worker identity plus `{id, generation}` before settlement. Cancellation rejects queued work immediately. For active synchronous work, the pool terminates the owning worker and creates a replacement before accepting new work. Runtime `error`/`messageerror` also replace only that slot; an application `ok:false` response reuses the healthy worker. `destroy` terminates without replacement.
 
-Add explicit tests for active cancellation and worker replacement, queued cancellation, item removal, reset, transferred buffers, late error/progress, and concurrency. Use a fake Worker implementation for the unit contract.
+Transfer input and exact-sized output `ArrayBuffer`s rather than cloning them. Read `file.arrayBuffer()` only inside an active queue runner and reread it on retry because transfer detaches the original. Generation checks prevent late completion/error/progress dispatch, but are not treated as active cancellation. Worker errors become item errors and do not stop unrelated tasks.
+
+Use the statically analyzable client factory `new Worker(new URL("../workers/image-worker.ts", import.meta.url), { type: "module" })`. Do not add global `WebWorker` libs to `tsconfig`; use narrow local worker types. The main-thread fallback uses concurrency one and yields/checks cancellation around `cleanBytes`, but explicitly cannot preempt the synchronous call itself.
+
+The hook creates no Worker during React render. A monotonic generation ref is invalidated before cancel/reset/unmount rejection callbacks can dispatch. Remove cancels one keyed task; cancel marks live items cancelled; reset empties state under a newer generation; unmount disposes the queue and terminates the pool.
+
+Add explicit tests for active cancellation and worker replacement, queued cancellation, item removal, reset, transferred buffers, retired-worker/mismatched messages, late error/progress, runtime vs application errors, concurrency, destroy, fallback, retry reread, and hook unmount. Use a fake Worker implementation for the unit contract.
 
 - [ ] **Step 4: Verify GREEN and worker compilation**
 
