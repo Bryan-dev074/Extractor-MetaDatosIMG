@@ -7,9 +7,11 @@ import {
   jpegSegments,
   jpegWithApp11,
   jpegWithComment,
+  jpegWithJumbfTrailingBytes,
   jpegWithMixedExif,
   jpegWithMultipartJumbf,
   jpegWithMultipartIcc,
+  jpegWithRepeatedMarkerFill,
   jpegWithUnknownAppAiText,
   progressiveJpegWithMetadataBetweenScans,
   readJpegExifOrientation,
@@ -70,6 +72,17 @@ describe("strict lossless JPEG cleaning", () => {
     expect(result.qualityVerified).toBe(true);
   });
 
+  it("requires exact JUMBF box framing before removing APP11 bytes", () => {
+    const direct = jpegWithJumbfTrailingBytes(false);
+    const directResult = cleanBytes(direct);
+    expect(directResult.cleaned).toEqual(direct);
+    expect(directResult.findings).toHaveLength(0);
+
+    expect(() => cleanBytes(jpegWithJumbfTrailingBytes(true))).toThrow(
+      "JUMBF JPEG inválido",
+    );
+  });
+
   it("preserves all multipart ICC segments byte-for-byte", () => {
     const source = jpegWithMultipartIcc();
     const result = cleanBytes(source);
@@ -100,11 +113,20 @@ describe("strict lossless JPEG cleaning", () => {
   });
 
   it("rejects cyclic, aliased, and overlapping EXIF instead of dropping presentation data", () => {
-    for (const kind of ["cycle", "alias", "overlap"] as const) {
+    for (const kind of ["cycle", "alias", "overlap", "unknown-alias"] as const) {
       expect(() => cleanBytes(jpegWithMixedExif(kind))).toThrow(
         "EXIF no se puede limpiar de forma segura",
       );
     }
+  });
+
+  it("traverses and preserves repeated FF fill bytes at a marker boundary", () => {
+    const source = jpegWithRepeatedMarkerFill();
+    const result = cleanBytes(source);
+
+    expect(result.cleaned).toEqual(source);
+    expect(extractJpegScans(result.cleaned)).toEqual(extractJpegScans(source));
+    expect(result.qualityVerified).toBe(true);
   });
 
   it("rejects JPEGs without a complete scan and EOI", () => {

@@ -148,6 +148,7 @@ function parseExif(tiff: Uint8Array): ParsedExif {
   const critical: Uint8Array[] = [];
   const visited = new Set<number>();
   let orientation: number | null = null;
+  let hasUncertainFieldType = false;
 
   const readOffsetValue = (reference: ValueReference, index: number): number => {
     const offset = reference.offset + index * 4;
@@ -183,6 +184,26 @@ function parseExif(tiff: Uint8Array): ParsedExif {
       if (!typeSize) {
         if (SUSPECT_TAGS.has(tag) || CRITICAL_TAGS.has(tag) || POINTER_TAGS.has(tag)) {
           unsafe("tipo TIFF desconocido en un campo relevante");
+        }
+        hasUncertainFieldType = true;
+        references.push({
+          tag,
+          offset: entryOffset + 8,
+          length: 4,
+          entryOffset,
+          critical: false,
+          suspect: false,
+        });
+        const possibleOffset = readUint32(tiff, entryOffset + 8, littleEndian, "EXIF");
+        if (count > 0 && possibleOffset < tiff.length) {
+          references.push({
+            tag,
+            offset: possibleOffset,
+            length: Math.min(count, tiff.length - possibleOffset),
+            entryOffset,
+            critical: false,
+            suspect: false,
+          });
         }
         continue;
       }
@@ -255,6 +276,10 @@ function parseExif(tiff: Uint8Array): ParsedExif {
     if (rawHasAi && matches.length === 0) unsafe("rastro de IA en una estructura no editable");
   } else if (matches.length === 0) {
     unsafe("bloque demasiado grande para inspeccionarlo");
+  }
+
+  if (matches.length > 0 && hasUncertainFieldType) {
+    unsafe("un tipo TIFF desconocido impide probar que la cirugía no tiene alias");
   }
 
   for (const match of matches) {

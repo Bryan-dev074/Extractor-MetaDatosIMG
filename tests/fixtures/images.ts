@@ -122,6 +122,18 @@ export function jpegWithApp11(jumbf: boolean): Uint8Array {
   return jpegDocument([jpegSegment(0xeb, payload)]);
 }
 
+export function jpegWithJumbfTrailingBytes(multipart: boolean): Uint8Array {
+  const data = ascii("c2pa-data");
+  const box = concat(u32(8 + data.length), ascii("jumb"), data);
+  const framedWithGarbage = concat(box, Uint8Array.of(0xde, 0xad));
+  if (!multipart) return jpegDocument([jpegSegment(0xeb, framedWithGarbage)]);
+  const split = 11;
+  return jpegDocument([
+    jpegSegment(0xeb, concat(ascii("JP"), u16(9), u32(1), framedWithGarbage.slice(0, split))),
+    jpegSegment(0xeb, concat(ascii("JP"), u16(9), u32(2), framedWithGarbage.slice(split))),
+  ]);
+}
+
 export function jpegWithMultipartJumbf(): Uint8Array {
   const data = ascii("c2pa-multipart-data");
   const box = concat(u32(8 + data.length), ascii("jumb"), data);
@@ -134,6 +146,14 @@ export function jpegWithMultipartJumbf(): Uint8Array {
 
 export function jpegWithUnknownAppAiText(): Uint8Array {
   return jpegDocument([jpegSegment(0xe5, ascii("Midjourney private application data"))]);
+}
+
+export function jpegWithRepeatedMarkerFill(): Uint8Array {
+  const source = jpegWithComment("ordinary comment").bytes;
+  const marker = source.findIndex(
+    (value, index) => value === 0xff && source[index + 1] === 0xfe,
+  );
+  return concat(source.slice(0, marker), Uint8Array.of(0xff), source.slice(marker));
 }
 
 export function jpegWithMultipartIcc(): Uint8Array {
@@ -151,12 +171,12 @@ export function jpegWithMultipartIcc(): Uint8Array {
 type ExifByteOrder = "II" | "MM";
 
 function exifTiff(
-  unsafe: "none" | "alias" | "overlap" | "cycle",
+  unsafe: "none" | "alias" | "overlap" | "cycle" | "unknown-alias",
   byteOrder: ExifByteOrder,
   orientationValue: number,
 ): Uint8Array {
   const software = ascii("Midjourney\0");
-  const unsafeReference = unsafe === "alias" || unsafe === "overlap";
+  const unsafeReference = unsafe === "alias" || unsafe === "overlap" || unsafe === "unknown-alias";
   const entryCount = unsafeReference ? 3 : 2;
   const ifdSize = 2 + entryCount * 12 + 4;
   const dataOffset = 8 + ifdSize;
@@ -172,12 +192,14 @@ function exifTiff(
   const entries = [orientation, softwareEntry];
   if (unsafeReference) {
     entries.push(
-      concat(
-        write16(0x011a),
-        write16(5),
-        write32(1),
-        write32(unsafe === "alias" ? dataOffset : dataOffset + 2),
-      ),
+      unsafe === "unknown-alias"
+        ? concat(write16(0xc001), write16(99), write32(software.length), write32(dataOffset))
+        : concat(
+            write16(0x011a),
+            write16(5),
+            write32(1),
+            write32(unsafe === "alias" ? dataOffset : dataOffset + 2),
+          ),
     );
   }
   return concat(
@@ -192,7 +214,7 @@ function exifTiff(
 }
 
 export function jpegWithMixedExif(
-  unsafe: boolean | "alias" | "overlap" | "cycle" = false,
+  unsafe: boolean | "alias" | "overlap" | "cycle" | "unknown-alias" = false,
   byteOrder: ExifByteOrder = "II",
   orientation = 6,
 ): Uint8Array {
@@ -358,7 +380,15 @@ export function pngWithCompressedInternationalText(size: number): Uint8Array {
 }
 
 export function pngWithMalformedText(
-  type: "ztxt-corrupt" | "ztxt-method" | "ztxt-separator" | "itxt-method" | "itxt-separator",
+  type:
+    | "ztxt-corrupt"
+    | "ztxt-method"
+    | "ztxt-separator"
+    | "itxt-method"
+    | "itxt-separator"
+    | "ztxt-trailing"
+    | "itxt-trailing"
+    | "ztxt-concatenated",
 ): Uint8Array {
   if (type === "ztxt-corrupt") {
     return pngDocument([pngChunk("zTXt", concat(ascii("comment"), Uint8Array.of(0, 0, 1, 2, 3)))]);
@@ -368,6 +398,31 @@ export function pngWithMalformedText(
   }
   if (type === "ztxt-separator") {
     return pngDocument([pngChunk("zTXt", ascii("no separator"))]);
+  }
+  if (type === "ztxt-trailing" || type === "ztxt-concatenated") {
+    const tail =
+      type === "ztxt-trailing"
+        ? Uint8Array.of(0xde, 0xad)
+        : pako.deflate(ascii("second stream"));
+    return pngDocument([
+      pngChunk(
+        "zTXt",
+        concat(ascii("comment"), Uint8Array.of(0, 0), pako.deflate(ascii("first stream")), tail),
+      ),
+    ]);
+  }
+  if (type === "itxt-trailing") {
+    return pngDocument([
+      pngChunk(
+        "iTXt",
+        concat(
+          ascii("comment"),
+          Uint8Array.of(0, 1, 0, 0, 0),
+          pako.deflate(ascii("first stream")),
+          Uint8Array.of(0xde, 0xad),
+        ),
+      ),
+    ]);
   }
   if (type === "itxt-method") {
     return pngDocument([
@@ -392,7 +447,10 @@ export function pngWithInvalidOrder(
     | "trns-before-plte"
     | "trns-with-alpha"
     | "invalid-gama-length"
-    | "apng-frame-without-data",
+    | "apng-frame-without-data"
+    | "fdat-without-active-fctl"
+    | "invalid-dispose-op"
+    | "invalid-blend-op",
 ): Uint8Array {
   if (kind === "duplicate-ihdr") return concat(PNG_SIGNATURE, IHDR, IHDR, IDAT, IEND);
   if (kind === "plte-after-idat") {
@@ -469,6 +527,28 @@ export function pngWithInvalidOrder(
       pngChunk("acTL", concat(u32(1), u32(0))),
       IDAT,
       pngChunk("fcTL", concat(u32(0), u32(1), u32(1), u32(0), u32(0), u16(1), u16(30), Uint8Array.of(0, 0))),
+      IEND,
+    );
+  }
+  if (kind === "fdat-without-active-fctl") {
+    return concat(
+      PNG_SIGNATURE,
+      IHDR,
+      pngChunk("acTL", concat(u32(1), u32(0))),
+      pngChunk("fcTL", concat(u32(0), u32(1), u32(1), u32(0), u32(0), u16(1), u16(30), Uint8Array.of(0, 0))),
+      IDAT,
+      pngChunk("fdAT", concat(u32(1), Uint8Array.of(1, 2, 3))),
+      IEND,
+    );
+  }
+  if (kind === "invalid-dispose-op" || kind === "invalid-blend-op") {
+    const operations = kind === "invalid-dispose-op" ? Uint8Array.of(3, 0) : Uint8Array.of(0, 2);
+    return concat(
+      PNG_SIGNATURE,
+      IHDR,
+      pngChunk("acTL", concat(u32(1), u32(0))),
+      pngChunk("fcTL", concat(u32(0), u32(1), u32(1), u32(0), u32(0), u16(1), u16(30), operations)),
+      IDAT,
       IEND,
     );
   }

@@ -77,6 +77,9 @@ describe("strict lossless PNG cleaning", () => {
       "ztxt-separator",
       "itxt-method",
       "itxt-separator",
+      "ztxt-trailing",
+      "itxt-trailing",
+      "ztxt-concatenated",
     ] as const) {
       expect(() => cleanBytes(pngWithMalformedText(kind))).toThrow("Texto PNG inválido");
     }
@@ -128,6 +131,9 @@ describe("strict lossless PNG cleaning", () => {
       "trns-with-alpha",
       "invalid-gama-length",
       "apng-frame-without-data",
+      "fdat-without-active-fctl",
+      "invalid-dispose-op",
+      "invalid-blend-op",
     ] as const) {
       expect(() => cleanBytes(pngWithInvalidOrder(kind))).toThrow(/PNG/);
     }

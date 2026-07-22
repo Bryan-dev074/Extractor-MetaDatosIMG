@@ -293,22 +293,33 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
   };
 }
 
-function hasCompleteJumbfBox(bytes: Uint8Array): boolean {
-  if (bytes.length < 8) return false;
-  let size = readUint32BE(bytes, 0, "JPEG JUMBF");
-  const type = readAscii(bytes, 4, 4, "JPEG JUMBF");
-  let header = 8;
-  if (size === 1) {
-    if (bytes.length < 16) return false;
-    const high = readUint32BE(bytes, 8, "JPEG JUMBF");
-    const low = readUint32BE(bytes, 12, "JPEG JUMBF");
-    if (high !== 0) return false;
-    size = low;
-    header = 16;
-  } else if (size === 0) {
-    size = bytes.length;
+function inspectJumbfFraming(bytes: Uint8Array): { valid: boolean; startsWithJumbf: boolean } {
+  let offset = 0;
+  let startsWithJumbf = false;
+  let boxIndex = 0;
+  while (offset < bytes.length) {
+    if (bytes.length - offset < 8) return { valid: false, startsWithJumbf };
+    let size = readUint32BE(bytes, offset, "JPEG JUMBF");
+    const type = readAscii(bytes, offset + 4, 4, "JPEG JUMBF");
+    let header = 8;
+    if (boxIndex === 0) startsWithJumbf = type === "jumb";
+    if (size === 1) {
+      if (bytes.length - offset < 16) return { valid: false, startsWithJumbf };
+      const high = readUint32BE(bytes, offset + 8, "JPEG JUMBF");
+      const low = readUint32BE(bytes, offset + 12, "JPEG JUMBF");
+      if (high !== 0) return { valid: false, startsWithJumbf };
+      size = low;
+      header = 16;
+    } else if (size === 0) {
+      size = bytes.length - offset;
+    }
+    if (size < header || size > bytes.length - offset) {
+      return { valid: false, startsWithJumbf };
+    }
+    offset += size;
+    boxIndex += 1;
   }
-  return type === "jumb" && size >= header && size <= bytes.length;
+  return { valid: offset === bytes.length && boxIndex > 0, startsWithJumbf };
 }
 
 interface JumbfGroup {
@@ -321,7 +332,8 @@ function classifyJumbf(tokens: readonly JpegToken[]): JumbfGroup[] {
   const fragments = new Map<number, Array<{ index: number; sequence: number; data: Uint8Array }>>();
   tokens.forEach((token, index) => {
     if (token.kind !== "segment" || token.marker !== 0xeb) return;
-    if (hasCompleteJumbfBox(token.payload)) {
+    const directFraming = inspectJumbfFraming(token.payload);
+    if (directFraming.valid && directFraming.startsWithJumbf) {
       direct.push({ indices: [index], payload: token.payload });
       return;
     }
@@ -339,12 +351,24 @@ function classifyJumbf(tokens: readonly JpegToken[]): JumbfGroup[] {
 
   for (const parts of fragments.values()) {
     parts.sort((left, right) => left.sequence - right.sequence);
-    if (parts.length === 0 || (parts[0].sequence !== 0 && parts[0].sequence !== 1)) continue;
+    if (parts.length === 0) continue;
+    const candidatePrefix = concatBytes(parts.map((part) => part.data), "JPEG JUMBF");
+    const candidateFraming = inspectJumbfFraming(candidatePrefix);
+    const firstSequenceValid = parts[0].sequence === 0 || parts[0].sequence === 1;
+    if (!firstSequenceValid) {
+      if (candidateFraming.startsWithJumbf) throw new Error("JUMBF JPEG inválido: secuencia incompleta.");
+      continue;
+    }
     const first = parts[0].sequence;
-    if (parts.some((part, index) => part.sequence !== first + index)) continue;
-    const payload = concatBytes(parts.map((part) => part.data), "JPEG JUMBF");
-    if (hasCompleteJumbfBox(payload)) {
+    if (parts.some((part, index) => part.sequence !== first + index)) {
+      if (candidateFraming.startsWithJumbf) throw new Error("JUMBF JPEG inválido: secuencia incompleta.");
+      continue;
+    }
+    const payload = candidatePrefix;
+    if (candidateFraming.valid && candidateFraming.startsWithJumbf) {
       direct.push({ indices: parts.map((part) => part.index), payload });
+    } else if (candidateFraming.startsWithJumbf) {
+      throw new Error("JUMBF JPEG inválido: framing multipart incompleto.");
     }
   }
   return direct;
@@ -526,4 +550,3 @@ export function cleanJpeg(bytes: Uint8Array): CleanResult {
     outputExtension: ".jpg",
   };
 }
-

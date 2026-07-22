@@ -133,8 +133,9 @@ function inflateBounded(compressed: Uint8Array): Uint8Array {
     total += chunk.length;
     chunks.push(chunk.slice());
   };
+  let completed: boolean;
   try {
-    inflater.push(compressed, true);
+    completed = inflater.push(compressed, true);
   } catch (error) {
     if (overflow || (error instanceof Error && error.message.includes("límite seguro"))) {
       throw new Error("Texto PNG excede el límite seguro.");
@@ -142,7 +143,15 @@ function inflateBounded(compressed: Uint8Array): Uint8Array {
     throw new Error("Texto PNG inválido: datos zlib corruptos.");
   }
   if (overflow) throw new Error("Texto PNG excede el límite seguro.");
-  if (inflater.err !== 0) throw new Error("Texto PNG inválido: datos zlib corruptos.");
+  if (!completed || inflater.err !== 0) {
+    throw new Error("Texto PNG inválido: datos zlib corruptos.");
+  }
+  const stream = (
+    inflater as typeof inflater & { strm: { next_in: number; avail_in: number } }
+  ).strm;
+  if (stream.next_in !== compressed.length || stream.avail_in !== 0) {
+    throw new Error("Texto PNG inválido: datos después del stream zlib.");
+  }
   return concatBytes(chunks, "Texto PNG");
 }
 
@@ -240,6 +249,7 @@ function parsePng(bytes: Uint8Array): ParsedPng {
   let expectedApngFrames = 0;
   let frameControlCount = 0;
   let pendingFrameData = false;
+  let activeFrameDataKind: "idat" | "fdat" | null = null;
   const chunkCounts = new Map<string, number>();
 
   while (offset < bytes.length) {
@@ -316,7 +326,7 @@ function parsePng(bytes: Uint8Array): ParsedPng {
     } else if (type === "IDAT") {
       if (dimensions?.colorType === 3 && !seenPlte) throw new Error("PNG indexado sin PLTE.");
       seenIdat = true;
-      if (pendingFrameData) pendingFrameData = false;
+      if (activeFrameDataKind === "idat") pendingFrameData = false;
       pixelPayloads.push(checkedSlice(data, 0, data.length, "PNG IDAT"));
     } else if (type === "IEND") {
       if (length !== 0) throw new Error("IEND PNG inválido.");
@@ -379,6 +389,7 @@ function parsePng(bytes: Uint8Array): ParsedPng {
       expectedApngSequence += 1;
       frameControlCount += 1;
       pendingFrameData = true;
+      activeFrameDataKind = seenIdat ? "fdat" : "idat";
       const width = readUint32BE(data, 4, "PNG fcTL");
       const height = readUint32BE(data, 8, "PNG fcTL");
       const x = readUint32BE(data, 12, "PNG fcTL");
@@ -392,8 +403,15 @@ function parsePng(bytes: Uint8Array): ParsedPng {
       ) {
         throw new Error("APNG fcTL fuera de dimensiones.");
       }
+      const disposeOperation = readUint8(data, 24, "PNG fcTL");
+      const blendOperation = readUint8(data, 25, "PNG fcTL");
+      if (disposeOperation > 2 || blendOperation > 1) {
+        throw new Error("APNG fcTL contiene operaciones inválidas.");
+      }
     } else if (type === "fdAT") {
-      if (!seenActl || !seenIdat || length < 4) throw new Error("APNG fdAT inválido.");
+      if (!seenActl || !seenIdat || length < 4 || activeFrameDataKind !== "fdat") {
+        throw new Error("APNG fdAT inválido: falta un fcTL activo.");
+      }
       const sequence = readUint32BE(data, 0, "PNG fdAT");
       if (sequence !== expectedApngSequence) throw new Error("Secuencia APNG inválida.");
       expectedApngSequence += 1;
