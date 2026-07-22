@@ -362,7 +362,7 @@ git commit -m "feat: normalize recursive folder inputs"
 - Produces: `createImageWorkerPool({ size, createWorker }): ImageWorkerPool`
 - Produces: `useBatchProcessor(): BatchProcessorApi`
 
-The generic queue owns scheduling only. Each queued task has a stable key and per-task `AbortSignal`; queued cancellation rejects before `run`, while active cancellation aborts the runner and keeps its concurrency slot occupied until the runner settles. `cancelAll` is reusable and `dispose` is terminal. Reject duplicate explicit keys.
+The generic queue owns scheduling only. Each queued task has a stable key and per-task `AbortSignal`; queued cancellation rejects before `run`. Active cancellation aborts and rejects the outward promise plus releases its logical key immediately, while the underlying runner keeps its internal concurrency slot occupied until it settles. This allows a replacement generation to enqueue the same id without over-admitting work. `cancelAll` is reusable and `dispose` is terminal. Reject duplicate explicit keys.
 
 - [ ] **Step 1: Write failing stale-result, cancellation, and concurrency tests**
 
@@ -412,7 +412,7 @@ export type WorkerResponse =
 
 Task 4 is clean-only so it compiles independently; Task 6 extends this discriminated protocol with TikTok contracts.
 
-Create two eager worker slots by default. Each slot owns at most one active request and validates the worker identity plus `{id, generation}` before settlement. Cancellation rejects queued work immediately. For active synchronous work, the pool terminates the owning worker and creates a replacement before accepting new work. Runtime `error`/`messageerror` also replace only that slot; an application `ok:false` response reuses the healthy worker. `destroy` terminates without replacement.
+Create two eager worker slots by default. Each slot owns at most one active request and validates the worker identity plus `{id, generation}` before settlement. Cancellation rejects queued work immediately. For active synchronous work, the pool terminates the owning worker and creates a replacement before accepting new work. Runtime `error`/`messageerror` also replace only that slot; an application `ok:false` response reuses the healthy worker. If replacement construction fails while another live worker is busy, new pool calls wait with abort-aware FIFO backpressure for the healthy slot instead of failing in a cascade; zero live workers fail clearly. `destroy` terminates without replacement and rejects waiters.
 
 Transfer input and exact-sized output `ArrayBuffer`s rather than cloning them. Read `file.arrayBuffer()` only inside an active queue runner and reread it on retry because transfer detaches the original. Generation checks prevent late completion/error/progress dispatch, but are not treated as active cancellation. Worker errors become item errors and do not stop unrelated tasks.
 
