@@ -453,18 +453,20 @@ git commit -m "feat: add cancellable image worker queue"
 
 **Interfaces:**
 - Consumes: safe archive paths and completed batch items.
-- Produces: `planArchive(items, mode): ArchivePlan`
-- Produces: `requestArchiveWriter(suggestedName): Promise<ArchiveWriter | null>`
-- Produces: `generateArchive(plan, { writer?, destination, signal, onProgress }): Promise<ArchiveResult>`
+- Produces: `planArchive({ archiveBase, outputs, skipped, failed }, mode): ArchivePlan`
+- Produces: `requestArchiveWriter(suggestedName): Promise<{ kind: "writer"; writer: ArchiveWriter } | { kind: "unsupported" } | { kind: "cancelled" }>`
+- Produces: `generateArchive(plan, { destination: { kind: "writer"; writer } | { kind: "blob" }, signal, onProgress }): Promise<ArchiveResult>`
 - Produces: `formatProcessingReport(summary): string`
+
+`ArchiveWriter` is the narrow local `{ write(Uint8Array), close(), abort(reason?) }` contract, not the full native stream type. Unsupported picker and user cancellation are distinct: only `unsupported` may trigger Blob fallback.
 
 - [ ] **Step 1: Write failing archive-plan and report tests**
 
 ```ts
 it("preserves nested paths and stores successful bytes", async () => {
-  const plan = planArchive([completed("Raíz/Sub/foto.jpg", bytes)], "clean");
+  const plan = planArchive(planningInput([completed("Raíz/Sub/foto.jpg", bytes)]), "clean");
   expect(plan.entries[0].path).toBe("Raíz/Sub/foto-limpio.jpg");
-  const archive = await generateArchive(plan, { destination: "blob" });
+  const archive = await generateArchive(plan, { destination: { kind: "blob" } });
   const opened = await JSZip.loadAsync(archive.blob);
   expect(await opened.file("Raíz/Sub/foto-limpio.jpg")!.async("uint8array")).toEqual(bytes);
 });
@@ -482,21 +484,28 @@ Expected: FAIL with missing archive modules.
 
 - [ ] **Step 3: Implement STORE ZIP generation, progress, report, and safe memory preflight**
 
-The UI click handler must call `requestArchiveWriter` immediately inside the user's activation, before awaiting archive planning. Use narrow local capability types for `showSaveFilePicker`, `FileSystemWritableFileStream`, and `navigator.deviceMemory` so unsupported browsers still typecheck and fall back safely.
+The UI click handler must call `requestArchiveWriter` immediately inside the user's activation, before awaiting archive planning. The picker itself is invoked before that async function's first `await`. Use narrow local capability types for `showSaveFilePicker` and `navigator.deviceMemory` so unsupported browsers still typecheck and fall back safely.
 
-Use `zip.generateInternalStream({ type: "uint8array", compression: "STORE", streamFiles: true })` for an already-opened `ArchiveWriter`. Pause the JSZip helper while awaiting each `writer.write(chunk)` and resume only after the promise settles. Always close on success and abort on cancellation/error. Tests cover backpressure, picker cancellation, close/abort, and monotonic progress.
+Plan entries deterministically by NFC source path then stable id. Clean entries require `qualityVerified === true` and use the detected `outputExtension`; TikTok entries always use `.png`. Use ZIP `STORE`, `createFolders: false`, and a fixed 1980 timestamp so equivalent plans generate identical bytes. The report lives at `<archive-root>/_reporte-procesamiento.txt`, escapes tabs/newlines/backslashes, uses LF plus final newline, and includes deterministic skipped/failed rows.
+
+Reject ZIP32-incompatible plans before JSZip: more than 65,535 entries including the report, UTF-8 names over 65,535 bytes, unsafe integer sums, or offsets/sizes approaching `0xffffffff`.
+
+Use `zip.generateInternalStream({ type: "uint8array", compression: "STORE", streamFiles: true })` for an already-opened `ArchiveWriter` or Blob chunk list. Register handlers before starting. Pause synchronously on data, serialize writes through one promise chain, and resume only after settlement. Await pending writes even if JSZip emits `end` first. Final progress 100 is emitted only after writer close or Blob construction. Always close exactly once on success and abort exactly once on cancellation/error; preserve the primary error if abort also fails. No progress or success occurs after a terminal state.
 
 The Blob fallback budget is:
 
 ```ts
 const gib = 1024 ** 3;
-const deviceBudget = typeof navigator !== "undefined" && navigator.deviceMemory
-  ? navigator.deviceMemory * 128 * 1024 ** 2
+const memory = typeof navigator !== "undefined"
+  ? (navigator as { deviceMemory?: number }).deviceMemory
+  : undefined;
+const deviceBudget = Number.isFinite(memory) && memory! > 0
+  ? memory! * 128 * 1024 ** 2
   : 512 * 1024 ** 2;
 const safeBudget = Math.min(gib, deviceBudget);
 ```
 
-Reject a fallback estimate above `safeBudget` before allocating the ZIP. Also refuse batch ingestion that already exceeds the same conservative retained-byte budget and clearly explain that smaller batches are required. Test exact budget boundaries and oversized fallback refusal. The browser release check must exercise direct writing and Blob fallback.
+Estimate both ZIP size and Blob peak (`payloadBytes + estimatedZipBytes`) with safe-integer checks. Reject only when peak is strictly above `safeBudget`, before creating JSZip or accumulating chunks; exact budget is allowed. Also refuse batch ingestion that already exceeds the same conservative retained-byte budget and clearly explain that smaller batches are required. Test invalid device-memory values, exact boundaries, overflow, backpressure, cancellation/write/close/progress errors, picker states, deterministic bytes, STORE methods, and direct-vs-Blob entry equivalence. The browser release check must exercise direct writing and Blob fallback.
 
 - [ ] **Step 4: Verify GREEN**
 
