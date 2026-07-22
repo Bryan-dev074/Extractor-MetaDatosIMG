@@ -57,6 +57,7 @@
 - Modify: `package-lock.json`
 - Create: `eslint.config.mjs`
 - Create: `vitest.config.ts`
+- Create: `tests/setup.ts`
 - Create: `lib/metadata/format.ts`
 - Create: `tests/metadata/format.test.ts`
 
@@ -87,7 +88,7 @@ describe("image format detection", () => {
 Run:
 
 ```powershell
-npm install --save-dev vitest eslint eslint-config-next
+npm install --save-dev vitest@3.2.4 eslint eslint-config-next @testing-library/react @testing-library/jest-dom jsdom
 npm test -- tests/metadata/format.test.ts
 ```
 
@@ -138,10 +139,12 @@ npm run build
 
 Expected: all commands exit 0 without interactive prompts.
 
+The Vitest configuration must keep binary/unit tests in the Node environment and make `jsdom` plus `@testing-library/jest-dom` available to later `tests/ui/**/*.test.tsx` files. Pin tooling to versions whose engines support the project's active Node runtime and whose peer dependencies remain compatible with Next 15.
+
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add package.json package-lock.json eslint.config.mjs vitest.config.ts lib/metadata/format.ts tests/metadata/format.test.ts
+git add package.json package-lock.json eslint.config.mjs vitest.config.ts tests/setup.ts lib/metadata/format.ts tests/metadata/format.test.ts
 git commit -m "test: add non-interactive quality tooling"
 ```
 
@@ -200,6 +203,8 @@ it("preserves every IDAT byte and APNG fdAT byte", () => {
 });
 ```
 
+Also cover progressive JPEG metadata between scans, non-JUMBF APP11 preservation, multipart ICC, orientation-bearing mixed EXIF rejection, unknown PNG ancillary preservation, unknown PNG critical rejection, compressed-text expansion limits, and cleaned-output reparsing. Decoding equality is a release browser check; mandatory unit tests compare the exact canonical pixel-bearing payloads and visual-critical structures.
+
 - [ ] **Step 2: Run the focused tests and verify RED**
 
 Run:
@@ -223,7 +228,9 @@ export function assertRange(bytes: Uint8Array, offset: number, length: number, l
 }
 ```
 
-JPEG completion is valid only after SOI, at least one SOS, complete scan traversal, and EOI. PNG completion is valid only after valid signature, ordered `IHDR`, at least one `IDAT`, valid CRC for every chunk, and `IEND`. Preserve `acTL`, `fcTL`, and `fdAT` without text scanning. Reject unsafe mixed EXIF surgery rather than dropping orientation-bearing APP1.
+JPEG completion is valid only after SOI, at least one SOS, complete scan traversal, and EOI. Parse markers between progressive scans; preserve unknown APP markers and remove APP11 only after positive JUMBF classification. PNG completion is valid only after valid signature, ordered `IHDR`, at least one `IDAT`, valid CRC for every chunk, and `IEND`. Preserve `acTL`, `fcTL`, `fdAT`, and unknown ancillary chunks without text scanning; reject unknown critical chunks. Limit both scanned text and decompressed text before allocating unbounded output. Reject unsafe mixed or aliased/cyclic EXIF surgery rather than dropping orientation-bearing APP1.
+
+After surgery, run the cleaned bytes through the same strict structural parser and compare canonical JPEG scan bytes or PNG `IDAT`/`fdAT` bytes plus ICC, dimensions, orientation/density, palette/transparency/animation, and color-critical structures byte-for-byte. Only then set `qualityVerified: true`. `pixelPayloadHash` is a deterministic `crc32:<8-hex>:<byte-length>` display fingerprint; correctness relies on the byte comparison, not on hash collision resistance.
 
 - [ ] **Step 4: Add the public facade and compatibility exports**
 
@@ -272,9 +279,11 @@ git commit -m "fix: harden lossless JPEG and PNG cleaning"
 - Create: `tests/batch/archive-path.test.ts`
 
 **Interfaces:**
-- Produces: `normalizeFiles(files: Iterable<File>, source: InputSource): InputImage[]`
-- Produces: `readDroppedItems(items: DataTransferItemList): Promise<InputImage[]>`
-- Produces: `createArchivePath(relativePath: string, mode: "clean" | "tiktok", used: Set<string>): string`
+- Produces: `normalizeFiles(files: Iterable<File>, source: InputSource): Promise<InputSelection>`
+- Produces: `readDroppedItems(items: DataTransferItemList): Promise<InputSelection>`
+- Produces: `createArchivePath(relativePath: string, mode: "clean" | "tiktok", used: Set<string>, outputExtension?: ".jpg" | ".png"): string`
+
+`InputSelection` contains deterministic `accepted: InputImage[]` and `skipped: SkippedInput[]`. Classification reads at most the first eight bytes and uses `detectImageFormat`; it never trusts the filename or MIME type. `InputImage` records the detected format so later archive naming can use the real clean output extension.
 
 - [ ] **Step 1: Write failing path and folder tests**
 
@@ -293,9 +302,13 @@ it("removes traversal and resolves collisions case-insensitively", () => {
 
 it("uses webkitRelativePath for selected folders", () => {
   const file = makeFile("foto.jpg", { webkitRelativePath: "Raíz/Sub/foto.jpg" });
-  expect(normalizeFiles([file], "folder")[0].relativePath).toBe("Raíz/Sub/foto.jpg");
+  return expect(normalizeFiles([file], "folder")).resolves.toMatchObject({
+    accepted: [{ relativePath: "Raíz/Sub/foto.jpg", format: "jpeg" }],
+  });
 });
 ```
+
+Add wrong-extension, extensionless JPEG/PNG, fake image, skipped-report, duplicate fingerprint, root-name, and multiple-root tests. Clean archive names use the detected extension; TikTok names always use `.png`.
 
 - [ ] **Step 2: Verify RED**
 
@@ -305,7 +318,7 @@ Expected: FAIL with missing modules.
 
 - [ ] **Step 3: Implement normalization, recursive dropped entries, and safe names**
 
-`readDroppedItems` must repeatedly call `FileSystemDirectoryReader.readEntries()` until it returns an empty array. Sort entries by normalized relative path to make UI and reports deterministic.
+`readDroppedItems` must repeatedly call `FileSystemDirectoryReader.readEntries()` until it returns an empty array. Sort accepted and skipped entries by normalized relative path to make UI and reports deterministic. A single selected folder retains its safe root; mixed loose files or multiple folder roots use the deterministic archive label `imagenes-procesadas` while preserving every safe root path within the ZIP.
 
 Collision keys use `path.normalize("NFC").toLocaleLowerCase("en-US")`; a loop increments suffixes until the complete path is unique.
 
@@ -334,15 +347,18 @@ git commit -m "feat: normalize recursive folder inputs"
 **Files:**
 - Create: `lib/batch/reducer.ts`
 - Create: `lib/batch/queue.ts`
+- Create: `lib/batch/worker-pool.ts`
 - Create: `workers/image-worker.ts`
 - Create: `hooks/useBatchProcessor.ts`
 - Create: `tests/batch/reducer.test.ts`
 - Create: `tests/batch/queue.test.ts`
+- Create: `tests/batch/worker-pool.test.ts`
 
 **Interfaces:**
 - Consumes: `InputImage`, `cleanBytes`.
 - Produces: `batchReducer(state: BatchState, action: BatchAction): BatchState`
 - Produces: `createTaskQueue<T, R>({ concurrency, run }): TaskQueue<T, R>`
+- Produces: `createImageWorkerPool({ size, createWorker }): ImageWorkerPool`
 - Produces: `useBatchProcessor(): BatchProcessorApi`
 
 - [ ] **Step 1: Write failing stale-result, cancellation, and concurrency tests**
@@ -384,16 +400,18 @@ Expected: FAIL with missing reducer/queue.
 
 ```ts
 export type WorkerRequest =
-  | { id: string; generation: number; kind: "clean"; bytes: ArrayBuffer }
-  | { id: string; generation: number; kind: "tiktok"; bytes: ArrayBuffer; mime: string };
+  { id: string; generation: number; kind: "clean"; bytes: ArrayBuffer };
 
 export type WorkerResponse =
   | { id: string; generation: number; ok: true; kind: "clean"; result: CleanResult }
-  | { id: string; generation: number; ok: true; kind: "tiktok"; result: TikTokExportResult }
   | { id: string; generation: number; ok: false; error: string };
 ```
 
-Abort cancels queued tasks immediately and prevents resolved work from dispatching a completion action. Worker errors become item errors and do not stop unrelated tasks.
+Task 4 is clean-only so it compiles independently; Task 6 extends this discriminated protocol with TikTok contracts.
+
+Cancellation rejects queued work immediately. For active synchronous work, the pool terminates the owning worker and creates a replacement before accepting new work. Transfer input and output `ArrayBuffer`s rather than cloning them. Generation checks prevent late completion/error/progress dispatch, but are not treated as active cancellation. Worker errors become item errors and do not stop unrelated tasks.
+
+Add explicit tests for active cancellation and worker replacement, queued cancellation, item removal, reset, transferred buffers, late error/progress, and concurrency. Use a fake Worker implementation for the unit contract.
 
 - [ ] **Step 4: Verify GREEN and worker compilation**
 
@@ -427,7 +445,8 @@ git commit -m "feat: add cancellable image worker queue"
 **Interfaces:**
 - Consumes: safe archive paths and completed batch items.
 - Produces: `planArchive(items, mode): ArchivePlan`
-- Produces: `generateArchive(plan, options): Promise<ArchiveResult>`
+- Produces: `requestArchiveWriter(suggestedName): Promise<ArchiveWriter | null>`
+- Produces: `generateArchive(plan, { writer?, destination, signal, onProgress }): Promise<ArchiveResult>`
 - Produces: `formatProcessingReport(summary): string`
 
 - [ ] **Step 1: Write failing archive-plan and report tests**
@@ -454,7 +473,9 @@ Expected: FAIL with missing archive modules.
 
 - [ ] **Step 3: Implement STORE ZIP generation, progress, report, and safe memory preflight**
 
-Use `zip.generateInternalStream({ type: "uint8array", compression: "STORE", streamFiles: true })` for `FileSystemWritableFileStream`. Pause the JSZip helper while awaiting each `writer.write(chunk)` and resume only after the promise settles. Always close on success and abort on cancellation/error.
+The UI click handler must call `requestArchiveWriter` immediately inside the user's activation, before awaiting archive planning. Use narrow local capability types for `showSaveFilePicker`, `FileSystemWritableFileStream`, and `navigator.deviceMemory` so unsupported browsers still typecheck and fall back safely.
+
+Use `zip.generateInternalStream({ type: "uint8array", compression: "STORE", streamFiles: true })` for an already-opened `ArchiveWriter`. Pause the JSZip helper while awaiting each `writer.write(chunk)` and resume only after the promise settles. Always close on success and abort on cancellation/error. Tests cover backpressure, picker cancellation, close/abort, and monotonic progress.
 
 The Blob fallback budget is:
 
@@ -466,7 +487,7 @@ const deviceBudget = typeof navigator !== "undefined" && navigator.deviceMemory
 const safeBudget = Math.min(gib, deviceBudget);
 ```
 
-Reject a fallback estimate above `safeBudget` before allocating the ZIP.
+Reject a fallback estimate above `safeBudget` before allocating the ZIP. Also refuse batch ingestion that already exceeds the same conservative retained-byte budget and clearly explain that smaller batches are required. Test exact budget boundaries and oversized fallback refusal. The browser release check must exercise direct writing and Blob fallback.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -535,11 +556,13 @@ Expected: FAIL with missing TikTok modules.
 
 - [ ] **Step 3: Implement edge-safe mask and deterministic blue-noise dither**
 
-Compute integer luma as `(54 * r + 183 * g + 19 * b) >> 8`. Mark a pixel eligible only when alpha is 255, the maximum four-neighbor luma delta is at most 6, and the local 3x3 luma range is at most 12. Use a fixed 64x64 signed blue-noise table addressed with the content-derived seed. Apply only `-1`, `0`, or `1`, clamp channels to `[0, 255]`, and preserve alpha.
+Compute integer luma as `(54 * r + 183 * g + 19 * b) >> 8`. Mark a non-border pixel eligible only when alpha is 255, maximum four-neighbor luma delta is at most 6, local 3x3 luma range is at most 12, and four-neighbor RGB/chroma deltas remain below the documented threshold so isoluminant color edges are excluded. Use a fixed 64x64 signed blue-noise ordering addressed with the content-derived seed, then pair eligible non-saturated channel samples into balanced `+1/-1` changes. Leave unmatched or saturated samples unchanged. `meanDelta` is computed over actual applied RGB deltas and must be exactly zero; preserve alpha.
+
+Tests additionally cover sparse and odd masks, saturated channels, border pixels, isoluminant color edges, and assert that a sufficiently large smooth gradient receives nonzero changes.
 
 - [ ] **Step 4: Implement native-size sRGB PNG and approximate preview**
 
-Decode with `createImageBitmap(blob, { imageOrientation: "from-image", colorSpaceConversion: "default" })`, use an sRGB 2D context when supported, keep `bitmap.width`/`height`, and never upscale. Export PNG, then ensure one `sRGB` intent chunk exists before the first `IDAT`. Generate the preview as JPEG quality `0.75` and label its `approximate` field `true`.
+Decode with `createImageBitmap(blob, { imageOrientation: "from-image", colorSpaceConversion: "default" })`, use an sRGB 2D context when supported with a documented HTMLCanvasElement fallback, keep `bitmap.width`/`height`, and never upscale. Export PNG, remove conflicting `iCCP`/duplicate `sRGB` and inconsistent `gAMA`/`cHRM` chunks from the browser-encoded result, insert exactly one valid `sRGB` intent chunk before the first `IDAT`, and strictly reparse/CRC-check the final bytes. Generate the preview as JPEG quality `0.75` and label its `approximate` field `true`. Cancellation is checked between decode, canvas readback, PNG rewrite, and preview; active worker cancellation still terminates/replaces the worker per Task 4.
 
 - [ ] **Step 5: Add the Amazonian regression measurement**
 
@@ -553,7 +576,7 @@ npm test -- tests/tiktok
 Remove-Item Env:AMAZONIAN_FIXTURE_DIR
 ```
 
-Expected: deterministic tests pass and the local evidence test reports lower smooth-region block/banding metrics without reducing text-edge contrast beyond the specified 1% tolerance.
+Expected: deterministic tests pass and the local evidence test reports lower smooth-region block/banding metrics without reducing text-edge contrast beyond the specified 1% tolerance. This local Amazonian run is a mandatory release gate on the documented source hashes, not an optional skipped check.
 
 - [ ] **Step 6: Commit**
 
@@ -605,6 +628,8 @@ Expected: FAIL with missing components.
 - [ ] **Step 3: Implement source selection and reducer-driven page composition**
 
 `app/page.tsx` must not parse bytes or build ZIP paths. It wires `SourcePicker`, `BatchToolbar`, summary, and cards to `useBatchProcessor` only.
+
+Source selection awaits the magic-byte `InputSelection`, displays skipped entries before processing, and enforces the retained-byte preflight. A clean ZIP click acquires the optional direct writer immediately inside the click handler, then passes it into asynchronous archive planning/generation; picker cancellation leaves the UI idle and usable.
 
 Set the folder input property through its DOM ref to avoid relying on a non-standard JSX type:
 
@@ -660,6 +685,9 @@ Remove unsupported fixed claims about Instagram thresholds and TikTok targeting 
 ```powershell
 npm ci
 npm test
+$env:AMAZONIAN_FIXTURE_DIR='D:\ElaBela\POST\99 - Archivo\Versiones duplicadas\01 - Carruseles\9x16\Tarte Amazonian Clay'
+npm test -- tests/tiktok
+Remove-Item Env:AMAZONIAN_FIXTURE_DIR
 npm run lint
 npx tsc --noEmit --incremental false
 npm run build
@@ -678,7 +706,7 @@ Verify on the production build:
 2. Select a nested folder and confirm relative paths.
 3. Cancel a running batch and confirm no late results.
 4. Download one clean image and compare pixel payload hashes.
-5. Download the clean ZIP and inspect nested entries/report.
+5. Download the clean ZIP through direct-to-disk saving, inspect nested entries/report, cancel one picker, and separately exercise the Blob fallback plus oversized-memory refusal.
 6. Generate TikTok PNG and approximate preview.
 7. Download TikTok ZIP.
 8. Trigger unsupported and corrupt-file errors.

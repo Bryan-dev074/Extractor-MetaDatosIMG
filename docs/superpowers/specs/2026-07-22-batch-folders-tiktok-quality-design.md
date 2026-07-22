@@ -79,7 +79,7 @@ interface InputImage {
 
 - Folder selection uses `webkitdirectory` and `File.webkitRelativePath`, with feature detection and a multiple-file fallback.
 - Dropped directories use `DataTransferItem.webkitGetAsEntry()` recursively and repeatedly call `readEntries()` until the directory is exhausted.
-- Only JPEG and PNG candidates enter processing. Other files are counted as skipped and reported before work starts.
+- Candidate files are classified from an eight-byte slice, never from their filename or MIME type. JPEG and PNG files enter processing; unsupported files are counted as skipped and reported before work starts.
 - Re-adding the same source uses `relativePath + size + lastModified` to avoid accidental duplicate work.
 
 ## Safe Archive Paths
@@ -92,7 +92,8 @@ Archive paths are handled by one pure module and tested independently.
 - Replace Windows-invalid characters and reserved basenames such as `CON`, `NUL`, and `COM1`.
 - Apply `-limpio` or `-tiktok` only to the basename.
 - Resolve collisions case-insensitively on the complete normalized path with ` (2)`, ` (3)`, and so on.
-- Produce `<root>-limpia.zip` and `<root>-tiktok.zip` with matching root directories inside each archive.
+- Produce `<root>-limpia.zip` and `<root>-tiktok.zip` with matching root directories inside each archive. A single folder keeps that folder as its archive root; mixed loose files or multiple roots use `imagenes-procesadas` as the deterministic archive name and preserve each safe root below it.
+- Derive clean entry extensions from the detected format even when the source extension is missing or wrong. TikTok entries always end in `.png`.
 
 ## Processing Architecture
 
@@ -106,7 +107,7 @@ The page becomes a thin composition layer around focused modules:
 - `hooks/useBatchProcessor.ts`: reducer-based orchestration for React.
 - focused UI components for source selection, batch toolbar, summary, virtualized/lazy result cards, and error reporting.
 
-The worker pool runs at a default concurrency of two and reduces to one when estimated memory pressure is high. Every task carries a batch generation and abort token so reset, remove, and cancel operations cannot commit stale results.
+The worker pool runs at a default concurrency of two and reduces to one when estimated memory pressure is high. Every task carries a batch generation. Reset, remove, and cancel operations reject queued promises, terminate and replace workers that own active work, and ignore any stale generation that still reaches the coordinator. Generation checks protect state; worker replacement provides real cancellation for synchronous binary or canvas work.
 
 State is stored as `order: string[]` plus `itemsById: Record<string, BatchItem>` to avoid repeatedly scanning and copying the full list for every progress event.
 
@@ -130,6 +131,7 @@ State is stored as `order: string[]` plus `itemsById: Record<string, BatchItem>`
 - Identify JUMBF before classifying APP11; report C2PA separately from an AI-generator match.
 - Parse EXIF IFD chains safely and redact only values that can be changed without dropping orientation, resolution, or color fields.
 - If safe surgery is impossible, report an error instead of deleting a mixed metadata block that affects visual presentation.
+- A successful rewrite is parsed again with the same strict parser. `qualityVerified` is true only after exact comparison of scan payload bytes plus ICC, dimensions, orientation, density, and color-critical structures. The displayed payload fingerprint is deterministic `CRC32 + byte length`; equality itself is byte-for-byte, not hash-only.
 
 ### PNG
 
@@ -138,6 +140,7 @@ State is stored as `order: string[]` plus `itemsById: Record<string, BatchItem>`
 - Limit compressed text expansion and textual scan length.
 - Inspect only known text/metadata chunks for AI signatures.
 - Recalculate CRC only for chunks intentionally rewritten; copied chunks remain byte-identical.
+- Reject unknown critical chunks, preserve unknown ancillary chunks byte-for-byte, and parse the cleaned output again before success. Verification compares `IDAT`/`fdAT`, ICC, dimensions, bit depth, palette, transparency, animation, and color-critical structures byte-for-byte.
 
 ## User Experience
 
@@ -167,8 +170,8 @@ The project adds a non-interactive lint configuration and Vitest.
 
 ### TikTok
 
-- Smooth-region mask excludes edges and alpha.
-- Dither is deterministic, zero-mean, bounded to one channel level, and changes no ineligible pixel.
+- Smooth-region mask excludes luminance and chroma edges, borders, text-like contours, texture, and alpha.
+- Dither is deterministic, zero-mean over actual applied channel deltas, bounded to one channel level, and changes no ineligible pixel. Eligible non-saturated channel samples are paired for balanced `+1/-1` changes; unmatched or saturated samples remain unchanged.
 - Output dimensions equal the source dimensions and PNG output is sRGB.
 - The Amazonian Clay fixture demonstrates that the prepared preview reduces visible smooth-region banding/block metrics compared with the observed JPEG-intermediate path without harming text-edge metrics.
 
