@@ -1,4 +1,6 @@
-export type ImageFormat = "jpeg" | "png";
+import type { SupportedFormat } from "./metadata/format";
+
+export type ImageFormat = SupportedFormat;
 
 export type FindingCategory =
   | "C2PA / Content Credentials"
@@ -43,4 +45,10 @@ export interface CleanResult {
   isAi: boolean;
   /** Avisos (p. ej. marcas de agua invisibles que no son metadatos). */
   notices: string[];
+  /** Huella de visualización del payload canónico; no sustituye la comparación exacta. */
+  pixelPayloadHash: string;
+  /** Solo es true después de reparsear y comparar estructuras críticas byte por byte. */
+  qualityVerified: boolean;
+  /** Extensión derivada de los magic bytes, no del nombre de entrada. */
+  outputExtension: ".jpg" | ".png";
 }
