@@ -1,4 +1,4 @@
-import { DOMParser } from "@xmldom/xmldom";
+import { DOMParser, type Element as XmlElement, type Node as XmlNode } from "@xmldom/xmldom";
 import { scanForAi } from "../signatures";
 import type { CleanResult, Finding, PreservedItem } from "../types";
 import {
@@ -275,9 +275,6 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
       }
       const lineCount = readUint16BE(bytes, payloadStart, "JPEG DNL");
       if (lineCount === 0) throw new Error("DNL JPEG inválido: altura cero.");
-      if (sofHeight !== 0 && lineCount !== sofHeight) {
-        throw new Error("DNL JPEG inválido: altura contradictoria.");
-      }
       dimensions = { width: dimensions.width, height: lineCount };
       sawDnl = true;
     }
@@ -403,7 +400,6 @@ function inspectXmpStructure(text: string, extended: boolean): XmpStructure {
 
   const root = document.documentElement;
   if (!root) fail("XML sin elemento raíz");
-  const elements = document.getElementsByTagName("*");
   const extendedGuids = new Set<string>();
   const safeCarrierText: string[] = [];
   let referenceCount = 0;
@@ -418,9 +414,34 @@ function inspectXmpStructure(text: string, extended: boolean): XmpStructure {
     extendedGuids.add(guid.toUpperCase());
   };
 
-  for (let index = 0; index < elements.length; index += 1) {
-    const element = elements.item(index);
-    if (!element) continue;
+  const inspectAttributes = (element: XmlElement): void => {
+    for (let index = 0; index < element.attributes.length; index += 1) {
+      const attribute = element.attributes.item(index);
+      if (!attribute) continue;
+      const namespace = attribute.namespaceURI ?? "";
+      const localName = attribute.localName ?? attribute.nodeName.split(":").at(-1) ?? "";
+      if (
+        namespace === XMLNS_NAMESPACE ||
+        attribute.nodeName === "xmlns" ||
+        attribute.nodeName.startsWith("xmlns:") ||
+        namespace === XML_NAMESPACE ||
+        (namespace === RDF_NAMESPACE && localName === "about")
+      ) {
+        continue;
+      }
+      if (namespace === XMP_NOTE_NAMESPACE && localName === "HasExtendedXMP") {
+        registerGuid(attribute.value);
+      } else if (namespace === XMP_NAMESPACE && localName === "CreatorTool") {
+        safeCarrierText.push(attribute.value);
+      } else if (XMP_PRESENTATION_NAMESPACES.has(namespace)) {
+        hasPresentation = true;
+      } else {
+        hasUnknownProperties = true;
+      }
+    }
+  };
+
+  const visitElement = (element: XmlElement): void => {
     const namespace = element.namespaceURI ?? "";
     const localName = element.localName ?? element.nodeName.split(":").at(-1) ?? "";
     const structural =
@@ -428,40 +449,64 @@ function inspectXmpStructure(text: string, extended: boolean): XmpStructure {
       (namespace === RDF_NAMESPACE && RDF_STRUCTURAL_ELEMENTS.has(localName));
 
     if (namespace === RDF_NAMESPACE && localName === "RDF") rdfCount += 1;
+    inspectAttributes(element);
     if (namespace === XMP_NAMESPACE && localName === "CreatorTool") {
+      if (
+        element.childNodes.length !== 1 ||
+        (element.firstChild?.nodeType !== 3 && element.firstChild?.nodeType !== 4)
+      ) {
+        fail("CreatorTool no es una propiedad de texto simple");
+      }
       safeCarrierText.push(element.textContent ?? "");
+      return;
     } else if (namespace === XMP_NOTE_NAMESPACE && localName === "HasExtendedXMP") {
+      if (
+        element.childNodes.length !== 1 ||
+        (element.firstChild?.nodeType !== 3 && element.firstChild?.nodeType !== 4)
+      ) {
+        fail("HasExtendedXMP no es una propiedad de texto simple");
+      }
       registerGuid(element.textContent ?? "");
+      return;
     } else if (XMP_PRESENTATION_NAMESPACES.has(namespace)) {
       hasPresentation = true;
     } else if (!structural) {
       hasUnknownProperties = true;
     }
 
-    for (let attributeIndex = 0; attributeIndex < element.attributes.length; attributeIndex += 1) {
-      const attribute = element.attributes.item(attributeIndex);
-      if (!attribute) continue;
-      const attributeNamespace = attribute.namespaceURI ?? "";
-      const attributeLocal = attribute.localName ?? attribute.nodeName.split(":").at(-1) ?? "";
-      if (
-        attributeNamespace === XMLNS_NAMESPACE ||
-        attribute.nodeName === "xmlns" ||
-        attribute.nodeName.startsWith("xmlns:") ||
-        attributeNamespace === XML_NAMESPACE ||
-        (attributeNamespace === RDF_NAMESPACE && attributeLocal === "about")
-      ) {
-        continue;
-      }
-      if (attributeNamespace === XMP_NOTE_NAMESPACE && attributeLocal === "HasExtendedXMP") {
-        registerGuid(attribute.value);
-      } else if (attributeNamespace === XMP_NAMESPACE && attributeLocal === "CreatorTool") {
-        safeCarrierText.push(attribute.value);
-      } else if (XMP_PRESENTATION_NAMESPACES.has(attributeNamespace)) {
-        hasPresentation = true;
-      } else {
-        hasUnknownProperties = true;
-      }
+    for (let index = 0; index < element.childNodes.length; index += 1) {
+      visitNode(element.childNodes.item(index), false);
     }
+  };
+
+  const validXpacket = (node: XmlNode): boolean => {
+    const instruction = node as XmlNode & { target?: string; data?: string };
+    if (instruction.target !== "xpacket" || typeof instruction.data !== "string") return false;
+    return (
+      /^\s*begin=(["'])(?:\uFEFF)?\1\s+id=(["'])W5M0MpCehiHzreSzNTczkc9d\2\s*$/.test(
+        instruction.data,
+      ) || /^\s*end=(["'])[wr]\1\s*$/.test(instruction.data)
+    );
+  };
+
+  function visitNode(node: XmlNode | null, documentLevel: boolean): void {
+    if (!node) return;
+    if (node.nodeType === 1) {
+      visitElement(node as XmlElement);
+      return;
+    }
+    if (node.nodeType === 3 || node.nodeType === 4) {
+      if ((node.nodeValue ?? "").trim() !== "") hasUnknownProperties = true;
+      return;
+    }
+    if (node.nodeType === 7 && documentLevel && validXpacket(node)) return;
+    if (node.nodeType === 8) fail("comentarios XML no permitidos");
+    if (node.nodeType === 7) fail("instrucción de procesamiento no permitida");
+    fail("tipo de nodo XML no permitido");
+  }
+
+  for (let index = 0; index < document.childNodes.length; index += 1) {
+    visitNode(document.childNodes.item(index), true);
   }
 
   if (rdfCount !== 1) fail("estructura RDF ambigua");

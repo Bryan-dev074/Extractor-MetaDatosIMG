@@ -21,7 +21,16 @@ const PNG_SIGNATURE = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x
 const KNOWN_CRITICAL = new Set(["IHDR", "PLTE", "IDAT", "IEND"]);
 const C2PA_CHUNKS = new Set(["caBX", "caMs", "caSt"]);
 const TEXT_CHUNKS = new Set(["tEXt", "zTXt", "iTXt"]);
-const COLOR_BEFORE_IDAT = new Set(["cHRM", "gAMA", "iCCP", "sBIT", "sRGB"]);
+const COLOR_BEFORE_IDAT = new Set([
+  "cHRM",
+  "gAMA",
+  "iCCP",
+  "sBIT",
+  "sRGB",
+  "cICP",
+  "mDCV",
+  "cLLI",
+]);
 const VISUAL_CHUNKS = new Set([
   "IHDR",
   "PLTE",
@@ -30,6 +39,9 @@ const VISUAL_CHUNKS = new Set([
   "sRGB",
   "gAMA",
   "cHRM",
+  "cICP",
+  "mDCV",
+  "cLLI",
   "sBIT",
   "pHYs",
   "bKGD",
@@ -63,6 +75,9 @@ const SINGLETON_CHUNKS = new Set([
   "tIME",
   "eXIf",
   "acTL",
+  "cICP",
+  "mDCV",
+  "cLLI",
 ]);
 
 interface ParsedText {
@@ -252,6 +267,8 @@ function parsePng(bytes: Uint8Array): ParsedPng {
   let idatClosed = false;
   let seenIend = false;
   let seenActl = false;
+  let seenCicp = false;
+  let seenMdcv = false;
   let expectedApngSequence = 0;
   let expectedApngFrames = 0;
   let frameControlCount = 0;
@@ -362,6 +379,27 @@ function parsePng(bytes: Uint8Array): ParsedPng {
         readUint31(data, field * 4, `valor cHRM ${field + 1}`);
       }
     }
+    if (type === "cICP") {
+      if (
+        length !== 4 ||
+        readUint8(data, 2, "PNG cICP") !== 0 ||
+        readUint8(data, 3, "PNG cICP") > 1
+      ) {
+        throw new Error("cICP PNG inválido.");
+      }
+      seenCicp = true;
+    }
+    if (type === "mDCV") {
+      if (length !== 24) throw new Error("mDCV PNG inválido.");
+      readUint31(data, 16, "luminancia máxima mDCV");
+      readUint31(data, 20, "luminancia mínima mDCV");
+      seenMdcv = true;
+    }
+    if (type === "cLLI") {
+      if (length !== 8) throw new Error("cLLI PNG inválido.");
+      readUint31(data, 0, "MaxCLL cLLI");
+      readUint31(data, 4, "MaxFALL cLLI");
+    }
     if (type === "tRNS") {
       const colorType = dimensions?.colorType;
       if (colorType === 3 && (!seenPlte || length > paletteEntries)) {
@@ -456,6 +494,7 @@ function parsePng(bytes: Uint8Array): ParsedPng {
   if (seenActl && frameControlCount !== expectedApngFrames) {
     throw new Error("APNG inválido: cantidad de frames no coincide con acTL.");
   }
+  if (seenMdcv && !seenCicp) throw new Error("mDCV PNG requiere un chunk cICP.");
   if (pendingFrameData) throw new Error("APNG inválido: frame sin datos.");
   return {
     chunks,

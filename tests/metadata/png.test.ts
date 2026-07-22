@@ -13,6 +13,7 @@ import {
   pngWithInvalidOrder,
   pngWithHighBitField,
   pngWithHighBitSemantic,
+  pngWithHdrMetadata,
   pngWithMalformedText,
   pngWithText,
   pngWithUnknownChunk,
@@ -168,6 +169,42 @@ describe("strict lossless PNG cleaning", () => {
       expect(() => cleanBytes(pngWithHighBitSemantic(kind))).toThrow(
         "PNG fuera del rango de 31 bits",
       );
+    }
+  });
+
+  it("preserves valid PNG Third Edition HDR chunks byte-for-byte", () => {
+    const source = pngWithHdrMetadata("valid");
+    const result = cleanBytes(source);
+    for (const type of ["cICP", "mDCV", "cLLI"]) {
+      expect(pngChunks(result.cleaned, type)).toEqual(pngChunks(source, type));
+    }
+    expect(result.qualityVerified).toBe(true);
+  });
+
+  it("applies uint31 bounds to every four-byte HDR luminance field", () => {
+    for (const kind of [
+      "clli-high-max",
+      "clli-high-average",
+      "mdcv-high-max",
+      "mdcv-high-min",
+    ] as const) {
+      expect(() => cleanBytes(pngWithHdrMetadata(kind))).toThrow(
+        "PNG fuera del rango de 31 bits",
+      );
+    }
+  });
+
+  it("validates HDR chunk length, order, singleton rules, and mDCV cICP dependency", () => {
+    for (const kind of [
+      "clli-length",
+      "mdcv-length",
+      "clli-after-plte",
+      "mdcv-after-idat",
+      "duplicate-clli",
+      "duplicate-mdcv",
+      "mdcv-without-cicp",
+    ] as const) {
+      expect(() => cleanBytes(pngWithHdrMetadata(kind))).toThrow(/PNG/);
     }
   });
 

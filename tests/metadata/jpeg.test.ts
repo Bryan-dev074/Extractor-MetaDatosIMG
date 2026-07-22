@@ -21,6 +21,7 @@ import {
   jpegWithPartiallyOverlappingIfds,
   jpegWithRepeatedMarkerFill,
   jpegWithStandardXmp,
+  jpegWithSubIfdFlood,
   jpegWithUnknownAppAiText,
   progressiveJpegWithMetadataBetweenScans,
   readJpegExifOrientation,
@@ -163,6 +164,10 @@ describe("strict lossless JPEG cleaning", () => {
     );
   });
 
+  it("caps total IFD visits for compact SubIFD floods", () => {
+    expect(() => cleanBytes(jpegWithSubIfdFlood())).toThrow(/límite.*IFD/i);
+  });
+
   it("fails closed for AI-bearing XMP with orientation or Camera Raw presentation settings", () => {
     expect(() => cleanBytes(jpegWithStandardXmp("mixed"))).toThrow(
       "XMP JPEG no se puede limpiar de forma segura",
@@ -177,6 +182,14 @@ describe("strict lossless JPEG cleaning", () => {
 
   it("rejects malformed or mixed-property AI-bearing standard XMP", () => {
     for (const kind of ["malformed-ai", "mixed-benign"] as const) {
+      expect(() => cleanBytes(jpegWithStandardXmp(kind))).toThrow(
+        "XMP JPEG no se puede limpiar de forma segura",
+      );
+    }
+  });
+
+  it("rejects every unclassified node before deleting AI-bearing XMP", () => {
+    for (const kind of ["direct-text", "comment", "unknown-pi", "nested-creator"] as const) {
       expect(() => cleanBytes(jpegWithStandardXmp(kind))).toThrow(
         "XMP JPEG no se puede limpiar de forma segura",
       );
@@ -205,10 +218,12 @@ describe("strict lossless JPEG cleaning", () => {
     expect(preserved.cleaned).toEqual(presentation);
     expect(preserved.qualityVerified).toBe(true);
 
-    const safeAi = jpegWithStandardXmp("safe-ai");
-    const cleaned = cleanBytes(safeAi);
-    expect(jpegSegments(cleaned.cleaned, 0xe1)).toHaveLength(0);
-    expect(cleaned.findings.length).toBeGreaterThan(0);
+    for (const kind of ["safe-ai", "safe-ai-xpacket"] as const) {
+      const safeAi = jpegWithStandardXmp(kind);
+      const cleaned = cleanBytes(safeAi);
+      expect(jpegSegments(cleaned.cleaned, 0xe1)).toHaveLength(0);
+      expect(cleaned.findings.length).toBeGreaterThan(0);
+    }
   });
 
   it("traverses and preserves repeated FF fill bytes at a marker boundary", () => {
@@ -264,13 +279,19 @@ describe("strict lossless JPEG cleaning", () => {
     }
   });
 
-  it("accepts only a consistent DNL immediately after scan one", () => {
+  it("accepts an authoritative nonzero DNL only immediately after scan one", () => {
     const source = jpegWithDnl("valid-nonzero");
     const result = cleanBytes(source);
     expect(result.cleaned).toEqual(source);
     expect(result.qualityVerified).toBe(true);
 
-    for (const kind of ["conflicting-nonzero", "delayed", "duplicate", "late-second-scan"] as const) {
+    const redefined = jpegWithDnl("redefined-nonzero");
+    const redefinedResult = cleanBytes(redefined);
+    expect(redefinedResult.cleaned).toEqual(redefined);
+    expect(redefinedResult.preserved.some((item) => item.detail.includes("1 × 120px"))).toBe(true);
+    expect(redefinedResult.qualityVerified).toBe(true);
+
+    for (const kind of ["delayed", "duplicate", "late-second-scan"] as const) {
       expect(() => cleanBytes(jpegWithDnl(kind))).toThrow(/DNL JPEG/);
     }
   });

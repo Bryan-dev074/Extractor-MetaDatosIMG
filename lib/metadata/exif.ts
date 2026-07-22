@@ -62,6 +62,7 @@ const POINTER_TAGS = new Set([0x8769, 0x8825, 0xa005]);
 const INDIRECT_VISUAL_TAGS = new Set([0x0111, 0x0117, 0x0201, 0x0202]);
 const MAX_IFD_ENTRIES = 4096;
 const MAX_IFD_DEPTH = 16;
+const MAX_IFD_VISITS = 512;
 const MAX_EXIF_TEXT = 1_048_576;
 
 const TAG_NAMES: Readonly<Record<number, string>> = {
@@ -158,6 +159,22 @@ function parseExif(tiff: Uint8Array): ParsedExif {
   const visualPayloadRanges: ValueReference[] = [];
   critical.push(checkedView(tiff, 0, 8, "EXIF"));
 
+  const insertStructuralRange = (range: ValueReference): void => {
+    let low = 0;
+    let high = structuralRanges.length;
+    while (low < high) {
+      const middle = low + Math.floor((high - low) / 2);
+      if (structuralRanges[middle].offset < range.offset) low = middle + 1;
+      else high = middle;
+    }
+    const previous = structuralRanges[low - 1];
+    const next = structuralRanges[low];
+    if ((previous && overlaps(range, previous)) || (next && overlaps(range, next))) {
+      unsafe("topologías IFD parcialmente superpuestas");
+    }
+    structuralRanges.splice(low, 0, range);
+  };
+
   const readOffsetValue = (reference: ValueReference, index: number): number => {
     const offset = reference.offset + index * 4;
     return readUint32(tiff, offset, littleEndian, "EXIF");
@@ -185,6 +202,7 @@ function parseExif(tiff: Uint8Array): ParsedExif {
     if (depth > MAX_IFD_DEPTH) unsafe("cadena IFD demasiado profunda");
     if (ifdOffset === 0) return;
     if (visited.has(ifdOffset)) unsafe("cadena IFD cíclica o aliased");
+    if (visited.size >= MAX_IFD_VISITS) unsafe("límite total de IFD excedido");
     visited.add(ifdOffset);
 
     let entryCount: number;
@@ -211,10 +229,7 @@ function parseExif(tiff: Uint8Array): ParsedExif {
       critical: true,
       suspect: false,
     };
-    for (const existing of structuralRanges) {
-      if (overlaps(topology, existing)) unsafe("topologías IFD parcialmente superpuestas");
-    }
-    structuralRanges.push(topology);
+    insertStructuralRange(topology);
     for (const visual of visualPayloadRanges) {
       if (overlaps(topology, visual)) unsafe("un payload visual invade la topología IFD");
     }
