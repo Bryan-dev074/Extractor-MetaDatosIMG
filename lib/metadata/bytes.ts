@@ -199,7 +199,16 @@ export function crc32(bytes: Uint8Array): number {
 }
 
 export function payloadFingerprint(parts: readonly Uint8Array[]): string {
-  const payload = concatBytes(parts, "Payload de píxeles");
-  return `crc32:${crc32(payload).toString(16).padStart(8, "0")}:${payload.length}`;
+  const table = getCrcTable();
+  let crc = 0xffffffff;
+  let length = 0;
+  for (const part of parts) {
+    if (part.length > Number.MAX_SAFE_INTEGER - length) {
+      throw new Error("Payload de píxeles: tamaño inválido.");
+    }
+    length += part.length;
+    for (const byte of part) crc = (crc >>> 8) ^ table[(crc ^ byte) & 0xff];
+  }
+  const finalized = (crc ^ 0xffffffff) >>> 0;
+  return `crc32:${finalized.toString(16).padStart(8, "0")}:${length}`;
 }
-

@@ -253,8 +253,9 @@ function parsePng(bytes: Uint8Array): ParsedPng {
   const chunkCounts = new Map<string, number>();
 
   while (offset < bytes.length) {
-    pngRange(bytes, offset, 12);
+    pngRange(bytes, offset, 8);
     const length = readUint32BE(bytes, offset, "PNG");
+    if (length > 0x7fffffff) throw new Error("PNG fuera del rango de 31 bits: longitud de chunk.");
     const type = readAscii(bytes, offset + 4, 4, "PNG");
     if (!/^[A-Za-z]{4}$/.test(type)) throw new Error("PNG inválido: tipo de chunk inválido.");
     const reservedCode = type.charCodeAt(2);
@@ -284,7 +285,7 @@ function parsePng(bytes: Uint8Array): ParsedPng {
     if (seenIdat && type !== "IDAT") idatClosed = true;
     if (type === "IDAT" && idatClosed) throw new Error("Orden PNG inválido: IDAT no contiguos.");
 
-    const raw = checkedSlice(bytes, offset, chunkEnd - offset, "PNG");
+    const raw = checkedView(bytes, offset, chunkEnd - offset, "PNG");
     const data = checkedView(bytes, dataStart, length, "PNG");
     const chunk: PngChunk = { type, start: offset, end: chunkEnd, dataStart, dataEnd, raw, data };
 
@@ -294,6 +295,9 @@ function parsePng(bytes: Uint8Array): ParsedPng {
       }
       const width = readUint32BE(data, 0, "PNG IHDR");
       const height = readUint32BE(data, 4, "PNG IHDR");
+      if (width > 0x7fffffff || height > 0x7fffffff) {
+        throw new Error("PNG fuera del rango de 31 bits: dimensiones IHDR.");
+      }
       const depth = readUint8(data, 8, "PNG IHDR");
       const colorType = readUint8(data, 9, "PNG IHDR");
       const compression = readUint8(data, 10, "PNG IHDR");
@@ -327,7 +331,7 @@ function parsePng(bytes: Uint8Array): ParsedPng {
       if (dimensions?.colorType === 3 && !seenPlte) throw new Error("PNG indexado sin PLTE.");
       seenIdat = true;
       if (activeFrameDataKind === "idat") pendingFrameData = false;
-      pixelPayloads.push(checkedSlice(data, 0, data.length, "PNG IDAT"));
+      pixelPayloads.push(checkedView(data, 0, data.length, "PNG IDAT"));
     } else if (type === "IEND") {
       if (length !== 0) throw new Error("IEND PNG inválido.");
       if (!seenIdat) throw new Error("PNG sin datos de imagen.");
@@ -416,7 +420,7 @@ function parsePng(bytes: Uint8Array): ParsedPng {
       if (sequence !== expectedApngSequence) throw new Error("Secuencia APNG inválida.");
       expectedApngSequence += 1;
       pendingFrameData = false;
-      pixelPayloads.push(checkedSlice(data, 0, data.length, "PNG fdAT"));
+      pixelPayloads.push(checkedView(data, 0, data.length, "PNG fdAT"));
     }
 
     if (TEXT_CHUNKS.has(type)) chunk.text = parseTextChunk(type, data);

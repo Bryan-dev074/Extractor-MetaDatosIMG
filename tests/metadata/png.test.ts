@@ -10,6 +10,7 @@ import {
   pngWithCompressedInternationalText,
   pngWithCompressedText,
   pngWithInvalidOrder,
+  pngWithHighBitField,
   pngWithMalformedText,
   pngWithText,
   pngWithUnknownChunk,
@@ -136,6 +137,14 @@ describe("strict lossless PNG cleaning", () => {
       "invalid-blend-op",
     ] as const) {
       expect(() => cleanBytes(pngWithInvalidOrder(kind))).toThrow(/PNG/);
+    }
+  });
+
+  it("rejects PNG chunk lengths and IHDR dimensions with the unsigned high bit set", () => {
+    for (const kind of ["chunk-length", "width", "height"] as const) {
+      expect(() => cleanBytes(pngWithHighBitField(kind))).toThrow(
+        "PNG fuera del rango de 31 bits",
+      );
     }
   });
 });

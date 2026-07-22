@@ -84,7 +84,18 @@ interface ParsedJpeg {
   density: number | null;
   orientation: number | null;
   iccBytes: number;
+  xmp: XmpAnalysis;
 }
+
+interface XmpAnalysis {
+  removals: Map<number, ReturnType<typeof scanForAi>>;
+  presentation: Uint8Array[];
+}
+
+const XMP_HEADER = "http://ns.adobe.com/xap/1.0/\0";
+const EXTENDED_XMP_HEADER = "http://ns.adobe.com/xmp/extension/\0";
+const XMP_PRESENTATION_PATTERN =
+  /\b(?:crs:[A-Za-z0-9_]+|tiff:(?:Orientation|XResolution|YResolution|ResolutionUnit|ImageWidth|ImageLength)|exif:(?:Orientation|ColorSpace|PixelXDimension|PixelYDimension)|photoshop:(?:ICCProfile|ColorMode))\b/i;
 
 function truncated(): never {
   throw new Error("JPEG truncado.");
@@ -116,6 +127,8 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
   let sawSof = false;
   let sawSos = false;
   let sawEoi = false;
+  let needsDnl = false;
+  let sawDnl = false;
 
   while (offset < bytes.length) {
     jpegRange(bytes, offset, 2);
@@ -144,7 +157,7 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
         marker,
         start: markerStart,
         end: markerEnd,
-        raw: checkedSlice(bytes, markerStart, markerEnd - markerStart, "JPEG"),
+        raw: checkedView(bytes, markerStart, markerEnd - markerStart, "JPEG"),
       });
       sawEoi = true;
       offset = markerEnd;
@@ -160,7 +173,7 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
         marker,
         start: markerStart,
         end: markerEnd,
-        raw: checkedSlice(bytes, markerStart, markerEnd - markerStart, "JPEG"),
+        raw: checkedView(bytes, markerStart, markerEnd - markerStart, "JPEG"),
       });
       offset = markerEnd;
       continue;
@@ -180,7 +193,7 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
       end: segmentEnd,
       payloadStart,
       payloadEnd,
-      raw: checkedSlice(bytes, markerStart, segmentEnd - markerStart, "JPEG"),
+      raw: checkedView(bytes, markerStart, segmentEnd - markerStart, "JPEG"),
       payload: checkedView(bytes, payloadStart, payloadEnd - payloadStart, "JPEG"),
     };
     tokens.push(token);
@@ -194,7 +207,8 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
       }
       const height = readUint16BE(bytes, payloadStart + 1, "JPEG");
       const width = readUint16BE(bytes, payloadStart + 3, "JPEG");
-      if (width === 0 || height === 0) throw new Error("Dimensiones JPEG inválidas.");
+      if (width === 0) throw new Error("Dimensiones JPEG inválidas.");
+      needsDnl = height === 0;
       dimensions = { width, height };
       sawSof = true;
     }
@@ -221,6 +235,17 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
         throw new Error("Secuencia ICC JPEG inválida.");
       }
       iccParts.push({ sequence, total, bytes: token.payload.length - 14 });
+    }
+
+    if (marker === 0xdc) {
+      if (!sawSos) throw new Error("DNL JPEG inválido: debe aparecer después de SOS.");
+      if (!needsDnl || sawDnl || segmentLength !== 4 || !dimensions) {
+        throw new Error("DNL JPEG inválido: orden o longitud incorrectos.");
+      }
+      const lineCount = readUint16BE(bytes, payloadStart, "JPEG DNL");
+      if (lineCount === 0) throw new Error("DNL JPEG inválido: altura cero.");
+      dimensions = { width: dimensions.width, height: lineCount };
+      sawDnl = true;
     }
 
     if (STRUCTURAL_CRITICAL_MARKERS.has(marker)) criticalSegments.push(token.raw);
@@ -255,7 +280,7 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
         cursor = next + 1;
         continue;
       }
-      const scan = checkedSlice(bytes, segmentEnd, prefix - segmentEnd, "JPEG scan");
+      const scan = checkedView(bytes, segmentEnd, prefix - segmentEnd, "JPEG scan");
       scans.push(scan);
       tokens.push({ kind: "scan", start: segmentEnd, end: prefix, raw: scan });
       offset = prefix;
@@ -265,6 +290,7 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
 
   if (!sawEoi) truncated();
   if (!sawSof || !sawSos || scans.length === 0) throw new Error("JPEG sin datos de imagen.");
+  if (needsDnl && !sawDnl) throw new Error("DNL JPEG faltante para SOF con altura cero.");
 
   if (iccParts.length > 0) {
     const total = iccParts[0].total;
@@ -290,36 +316,209 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
     density,
     orientation,
     iccBytes: iccParts.reduce((total, part) => total + part.bytes, 0),
+    xmp: analyzeXmp(tokens),
   };
 }
 
-function inspectJumbfFraming(bytes: Uint8Array): { valid: boolean; startsWithJumbf: boolean } {
+function decodeXmp(bytes: Uint8Array): string {
+  if (bytes.length > MAX_METADATA_SCAN) throw new Error("Metadatos JPEG exceden el límite seguro.");
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("XMP JPEG no se puede limpiar de forma segura: UTF-8 inválido.");
+  }
+}
+
+function structurallyCompleteXmp(text: string): boolean {
+  return /<rdf:RDF\b/i.test(text) && /<\/rdf:RDF\s*>/i.test(text);
+}
+
+function analyzeXmp(tokens: readonly JpegToken[]): XmpAnalysis {
+  const removals = new Map<number, ReturnType<typeof scanForAi>>();
+  const presentation: Uint8Array[] = [];
+  const referencedGuids = new Set<string>();
+  const extensionGroups = new Map<
+    string,
+    Array<{ index: number; total: number; offset: number; data: Uint8Array; raw: Uint8Array }>
+  >();
+
+  tokens.forEach((token, index) => {
+    if (token.kind !== "segment" || token.marker !== 0xe1) return;
+    if (startsWithAscii(token.payload, XMP_HEADER)) {
+      const packet = checkedView(
+        token.payload,
+        XMP_HEADER.length,
+        token.payload.length - XMP_HEADER.length,
+        "JPEG XMP",
+      );
+      const text = decodeXmp(packet);
+      const hits = scanForAi(text);
+      const hasPresentation = XMP_PRESENTATION_PATTERN.test(text);
+      const extendedMatch = /HasExtendedXMP\s*=\s*["']([0-9A-Fa-f]{32})["']/i.exec(text);
+      if (extendedMatch) referencedGuids.add(extendedMatch[1].toUpperCase());
+      if (hits.length > 0) {
+        if (hasPresentation || extendedMatch || !structurallyCompleteXmp(text)) {
+          throw new Error(
+            "XMP JPEG no se puede limpiar de forma segura: contiene datos de presentación o estructura mixta.",
+          );
+        }
+        removals.set(index, hits);
+      }
+      if (hasPresentation) presentation.push(token.raw);
+      return;
+    }
+    if (!startsWithAscii(token.payload, EXTENDED_XMP_HEADER)) return;
+    const prefixLength = EXTENDED_XMP_HEADER.length;
+    if (token.payload.length < prefixLength + 40) {
+      throw new Error("XMP extendido JPEG inválido o no editable de forma segura: cabecera truncada.");
+    }
+    const guid = readAscii(token.payload, prefixLength, 32, "JPEG XMP extendido");
+    if (!/^[0-9A-Fa-f]{32}$/.test(guid)) {
+      throw new Error("XMP extendido JPEG inválido o no editable de forma segura: GUID inválido.");
+    }
+    const total = readUint32BE(token.payload, prefixLength + 32, "JPEG XMP extendido");
+    const fragmentOffset = readUint32BE(token.payload, prefixLength + 36, "JPEG XMP extendido");
+    const data = checkedView(
+      token.payload,
+      prefixLength + 40,
+      token.payload.length - prefixLength - 40,
+      "JPEG XMP extendido",
+    );
+    if (
+      total === 0 ||
+      total > MAX_METADATA_SCAN ||
+      fragmentOffset > total ||
+      data.length > total - fragmentOffset
+    ) {
+      throw new Error("XMP extendido JPEG inválido o no editable de forma segura: rango inválido.");
+    }
+    const key = guid.toUpperCase();
+    const fragments = extensionGroups.get(key) ?? [];
+    fragments.push({ index, total, offset: fragmentOffset, data, raw: token.raw });
+    extensionGroups.set(key, fragments);
+  });
+
+  for (const guid of referencedGuids) {
+    if (!extensionGroups.has(guid)) {
+      throw new Error("XMP extendido JPEG inválido o no editable de forma segura: GUID sin fragmentos.");
+    }
+  }
+
+  for (const [guid, fragments] of extensionGroups) {
+    fragments.sort((left, right) => left.offset - right.offset);
+    const total = fragments[0].total;
+    if (fragments.some((fragment) => fragment.total !== total)) {
+      throw new Error("XMP extendido JPEG inválido o no editable de forma segura: longitudes distintas.");
+    }
+    let cursor = 0;
+    for (const fragment of fragments) {
+      if (fragment.offset !== cursor) {
+        throw new Error("XMP extendido JPEG inválido o no editable de forma segura: fragmentos incompletos.");
+      }
+      cursor += fragment.data.length;
+    }
+    if (cursor !== total) {
+      throw new Error("XMP extendido JPEG inválido o no editable de forma segura: fragmentos incompletos.");
+    }
+    const packet = concatBytes(fragments.map((fragment) => fragment.data), "JPEG XMP extendido");
+    const text = decodeXmp(packet);
+    if (scanForAi(text).length > 0) {
+      throw new Error(
+        "XMP extendido JPEG inválido o no editable de forma segura: paquete sospechoso.",
+      );
+    }
+    if (XMP_PRESENTATION_PATTERN.test(text)) {
+      presentation.push(...fragments.map((fragment) => fragment.raw));
+    }
+    if (referencedGuids.has(guid) && !structurallyCompleteXmp(text)) {
+      throw new Error("XMP extendido JPEG inválido o no editable de forma segura: XML incompleto.");
+    }
+  }
+
+  return { removals, presentation };
+}
+
+interface IsoBox {
+  type: string;
+  start: number;
+  end: number;
+  dataStart: number;
+}
+
+interface BoxFraming {
+  valid: boolean;
+  startsWithJumbf: boolean;
+  boxes: IsoBox[];
+}
+
+const C2PA_JUMD_UUID = Uint8Array.of(
+  0x63, 0x32, 0x70, 0x61, 0x00, 0x11, 0x00, 0x10,
+  0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
+);
+
+function inspectJumbfFraming(bytes: Uint8Array): BoxFraming {
   let offset = 0;
   let startsWithJumbf = false;
-  let boxIndex = 0;
+  const boxes: IsoBox[] = [];
   while (offset < bytes.length) {
-    if (bytes.length - offset < 8) return { valid: false, startsWithJumbf };
+    if (bytes.length - offset < 8) return { valid: false, startsWithJumbf, boxes };
+    const boxStart = offset;
     let size = readUint32BE(bytes, offset, "JPEG JUMBF");
     const type = readAscii(bytes, offset + 4, 4, "JPEG JUMBF");
     let header = 8;
-    if (boxIndex === 0) startsWithJumbf = type === "jumb";
+    if (boxes.length === 0) startsWithJumbf = type === "jumb";
     if (size === 1) {
-      if (bytes.length - offset < 16) return { valid: false, startsWithJumbf };
+      if (bytes.length - offset < 16) return { valid: false, startsWithJumbf, boxes };
       const high = readUint32BE(bytes, offset + 8, "JPEG JUMBF");
       const low = readUint32BE(bytes, offset + 12, "JPEG JUMBF");
-      if (high !== 0) return { valid: false, startsWithJumbf };
+      if (high !== 0) return { valid: false, startsWithJumbf, boxes };
       size = low;
       header = 16;
     } else if (size === 0) {
       size = bytes.length - offset;
     }
     if (size < header || size > bytes.length - offset) {
-      return { valid: false, startsWithJumbf };
+      return { valid: false, startsWithJumbf, boxes };
     }
     offset += size;
-    boxIndex += 1;
+    boxes.push({ type, start: boxStart, end: offset, dataStart: boxStart + header });
   }
-  return { valid: offset === bytes.length && boxIndex > 0, startsWithJumbf };
+  return { valid: offset === bytes.length && boxes.length > 0, startsWithJumbf, boxes };
+}
+
+function hasC2paJumdIdentity(bytes: Uint8Array): boolean {
+  const outer = inspectJumbfFraming(bytes);
+  if (!outer.valid || outer.boxes.length !== 1 || outer.boxes[0].type !== "jumb") return false;
+  const outerBox = outer.boxes[0];
+  const childrenBytes = checkedView(
+    bytes,
+    outerBox.dataStart,
+    outerBox.end - outerBox.dataStart,
+    "JPEG JUMBF",
+  );
+  const children = inspectJumbfFraming(childrenBytes);
+  if (!children.valid || children.boxes.length === 0 || children.boxes[0].type !== "jumd") {
+    return false;
+  }
+  const description = children.boxes[0];
+  const data = checkedView(
+    childrenBytes,
+    description.dataStart,
+    description.end - description.dataStart,
+    "JPEG JUMD",
+  );
+  if (data.length < 22) return false;
+  for (let index = 0; index < C2PA_JUMD_UUID.length; index += 1) {
+    if (readUint8(data, index, "JPEG JUMD") !== C2PA_JUMD_UUID[index]) return false;
+  }
+  const toggles = readUint8(data, 16, "JPEG JUMD");
+  if ((toggles & 0x03) !== 0x03) return false;
+  let labelEnd = 17;
+  while (labelEnd < data.length && readUint8(data, labelEnd, "JPEG JUMD") !== 0) {
+    labelEnd += 1;
+  }
+  if (labelEnd >= data.length) return false;
+  return readAscii(data, 17, labelEnd - 17, "JPEG JUMD") === "c2pa";
 }
 
 interface JumbfGroup {
@@ -333,7 +532,11 @@ function classifyJumbf(tokens: readonly JpegToken[]): JumbfGroup[] {
   tokens.forEach((token, index) => {
     if (token.kind !== "segment" || token.marker !== 0xeb) return;
     const directFraming = inspectJumbfFraming(token.payload);
-    if (directFraming.valid && directFraming.startsWithJumbf) {
+    if (
+      directFraming.valid &&
+      directFraming.startsWithJumbf &&
+      hasC2paJumdIdentity(token.payload)
+    ) {
       direct.push({ indices: [index], payload: token.payload });
       return;
     }
@@ -344,7 +547,7 @@ function classifyJumbf(tokens: readonly JpegToken[]): JumbfGroup[] {
     list.push({
       index,
       sequence,
-      data: checkedSlice(token.payload, 8, token.payload.length - 8, "JPEG JUMBF"),
+      data: checkedView(token.payload, 8, token.payload.length - 8, "JPEG JUMBF"),
     });
     fragments.set(instance, list);
   });
@@ -365,9 +568,13 @@ function classifyJumbf(tokens: readonly JpegToken[]): JumbfGroup[] {
       continue;
     }
     const payload = candidatePrefix;
-    if (candidateFraming.valid && candidateFraming.startsWithJumbf) {
+    if (
+      candidateFraming.valid &&
+      candidateFraming.startsWithJumbf &&
+      hasC2paJumdIdentity(payload)
+    ) {
       direct.push({ indices: parts.map((part) => part.index), payload });
-    } else if (candidateFraming.startsWithJumbf) {
+    } else if (!candidateFraming.valid && candidateFraming.startsWithJumbf) {
       throw new Error("JUMBF JPEG inválido: framing multipart incompleto.");
     }
   }
@@ -420,6 +627,22 @@ export function cleanJpeg(bytes: Uint8Array): CleanResult {
       return;
     }
 
+    const xmpHits = source.xmp.removals.get(tokenIndex);
+    if (xmpHits) {
+      for (const hit of xmpHits) {
+        findings.push({
+          id: nextId(),
+          category: hit.category,
+          label: hit.label,
+          source: "JPEG · APP1 (XMP)",
+          detail: snippet(hit.match),
+          bytes: token.raw.length,
+          removed: true,
+        });
+      }
+      return;
+    }
+
     if (token.marker === 0xe1 && startsWithAscii(token.payload, "Exif\0\0")) {
       const tiff = checkedView(token.payload, 6, token.payload.length - 6, "JPEG EXIF");
       const result = cleanExifTiff(tiff);
@@ -446,14 +669,7 @@ export function cleanJpeg(bytes: Uint8Array): CleanResult {
 
     let inspectKnownMetadata = false;
     let sourceLabel = "";
-    if (
-      token.marker === 0xe1 &&
-      (startsWithAscii(token.payload, "http://ns.adobe.com/xap/1.0/\0") ||
-        startsWithAscii(token.payload, "http://ns.adobe.com/xmp/extension/\0"))
-    ) {
-      inspectKnownMetadata = true;
-      sourceLabel = "JPEG · APP1 (XMP)";
-    } else if (token.marker === 0xed && startsWithAscii(token.payload, "Photoshop 3.0\0")) {
+    if (token.marker === 0xed && startsWithAscii(token.payload, "Photoshop 3.0\0")) {
       inspectKnownMetadata = true;
       sourceLabel = "JPEG · APP13 (IPTC)";
     } else if (token.marker === 0xfe) {
@@ -491,6 +707,7 @@ export function cleanJpeg(bytes: Uint8Array): CleanResult {
     !byteArraysEqual(source.scans, verified.scans) ||
     !byteArraysEqual(source.criticalSegments, verified.criticalSegments) ||
     !byteArraysEqual(source.exifCritical, verified.exifCritical) ||
+    !byteArraysEqual(source.xmp.presentation, verified.xmp.presentation) ||
     source.dimensions.width !== verified.dimensions.width ||
     source.dimensions.height !== verified.dimensions.height ||
     source.density !== verified.density ||

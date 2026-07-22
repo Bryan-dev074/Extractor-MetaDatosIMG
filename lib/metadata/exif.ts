@@ -3,7 +3,7 @@ import type { FindingCategory } from "../types";
 import {
   assertRange,
   byteArraysEqual,
-  checkedSlice,
+  checkedView,
   decodeLatin1,
   readAscii,
   readUint16,
@@ -59,6 +59,7 @@ const SUSPECT_TAGS = new Set([
 ]);
 
 const POINTER_TAGS = new Set([0x8769, 0x8825, 0xa005]);
+const INDIRECT_VISUAL_TAGS = new Set([0x0111, 0x0117, 0x0201, 0x0202]);
 const MAX_IFD_ENTRIES = 4096;
 const MAX_IFD_DEPTH = 16;
 const MAX_EXIF_TEXT = 1_048_576;
@@ -84,6 +85,8 @@ const TAG_NAMES: Readonly<Record<number, string>> = {
 
 interface ValueReference {
   tag: number;
+  type: number;
+  count: number;
   offset: number;
   length: number;
   entryOffset: number;
@@ -149,10 +152,33 @@ function parseExif(tiff: Uint8Array): ParsedExif {
   const visited = new Set<number>();
   let orientation: number | null = null;
   let hasUncertainFieldType = false;
+  const structuralRanges: ValueReference[] = [
+    { tag: -1, type: 0, count: 1, offset: 0, length: 8, entryOffset: -1, critical: true, suspect: false },
+  ];
+  const visualPayloadRanges: ValueReference[] = [];
+  critical.push(checkedView(tiff, 0, 8, "EXIF"));
 
   const readOffsetValue = (reference: ValueReference, index: number): number => {
     const offset = reference.offset + index * 4;
     return readUint32(tiff, offset, littleEndian, "EXIF");
+  };
+
+  const readUnsignedValues = (reference: ValueReference, label: string): number[] => {
+    if (reference.type !== 3 && reference.type !== 4) unsafe(`${label} usa un tipo inválido`);
+    if (reference.count === 0 || reference.count > MAX_IFD_ENTRIES) {
+      unsafe(`${label} tiene una cantidad inválida`);
+    }
+    const values: number[] = [];
+    const width = reference.type === 3 ? 2 : 4;
+    for (let index = 0; index < reference.count; index += 1) {
+      const valueOffset = reference.offset + index * width;
+      values.push(
+        reference.type === 3
+          ? readUint16(tiff, valueOffset, littleEndian, "EXIF")
+          : readUint32(tiff, valueOffset, littleEndian, "EXIF"),
+      );
+    }
+    return values;
   };
 
   const visitIfd = (ifdOffset: number, depth: number): void => {
@@ -174,6 +200,23 @@ function parseExif(tiff: Uint8Array): ParsedExif {
     } catch {
       unsafe("IFD truncado");
     }
+    const topologyLength = 2 + entriesLength + 4;
+    const topology: ValueReference = {
+      tag: -2,
+      type: 0,
+      count: 1,
+      offset: ifdOffset,
+      length: topologyLength,
+      entryOffset: -2 - structuralRanges.length,
+      critical: true,
+      suspect: false,
+    };
+    structuralRanges.push(topology);
+    for (const visual of visualPayloadRanges) {
+      if (overlaps(topology, visual)) unsafe("un payload visual invade la topología IFD");
+    }
+    critical.push(checkedView(tiff, ifdOffset, 2, "EXIF"));
+    const localReferences: ValueReference[] = [];
 
     for (let index = 0; index < entryCount; index += 1) {
       const entryOffset = ifdOffset + 2 + index * 12;
@@ -182,12 +225,19 @@ function parseExif(tiff: Uint8Array): ParsedExif {
       const count = readUint32(tiff, entryOffset + 4, littleEndian, "EXIF");
       const typeSize = TIFF_TYPE_SIZE[type];
       if (!typeSize) {
-        if (SUSPECT_TAGS.has(tag) || CRITICAL_TAGS.has(tag) || POINTER_TAGS.has(tag)) {
+        if (
+          SUSPECT_TAGS.has(tag) ||
+          CRITICAL_TAGS.has(tag) ||
+          POINTER_TAGS.has(tag) ||
+          INDIRECT_VISUAL_TAGS.has(tag)
+        ) {
           unsafe("tipo TIFF desconocido en un campo relevante");
         }
         hasUncertainFieldType = true;
         references.push({
           tag,
+          type,
+          count,
           offset: entryOffset + 8,
           length: 4,
           entryOffset,
@@ -198,6 +248,8 @@ function parseExif(tiff: Uint8Array): ParsedExif {
         if (count > 0 && possibleOffset < tiff.length) {
           references.push({
             tag,
+            type,
+            count,
             offset: possibleOffset,
             length: Math.min(count, tiff.length - possibleOffset),
             entryOffset,
@@ -205,6 +257,7 @@ function parseExif(tiff: Uint8Array): ParsedExif {
             suspect: false,
           });
         }
+        critical.push(checkedView(tiff, entryOffset, 12, "EXIF"));
         continue;
       }
       const length = checkedProduct(count, typeSize);
@@ -219,6 +272,8 @@ function parseExif(tiff: Uint8Array): ParsedExif {
       }
       const reference: ValueReference = {
         tag,
+        type,
+        count,
         offset,
         length,
         entryOffset,
@@ -226,10 +281,13 @@ function parseExif(tiff: Uint8Array): ParsedExif {
         suspect: SUSPECT_TAGS.has(tag),
       };
       references.push(reference);
+      localReferences.push(reference);
+      critical.push(checkedView(tiff, entryOffset, 8, "EXIF"));
+      if (length > 4) critical.push(checkedView(tiff, entryOffset + 8, 4, "EXIF"));
 
       if (reference.critical) {
-        critical.push(checkedSlice(tiff, entryOffset, 12, "EXIF"));
-        if (length > 4) critical.push(checkedSlice(tiff, offset, length, "EXIF"));
+        critical.push(checkedView(tiff, entryOffset, 12, "EXIF"));
+        if (length > 4) critical.push(checkedView(tiff, offset, length, "EXIF"));
       }
       if (tag === 0x0112) {
         if (type !== 3 || count !== 1) unsafe("Orientation inválida");
@@ -263,7 +321,65 @@ function parseExif(tiff: Uint8Array): ParsedExif {
       }
     }
 
+    const resolvePayloadPairs = (
+      offsetTag: number,
+      lengthTag: number,
+      label: string,
+      requireLongSingle: boolean,
+    ): void => {
+      const offsetEntries = localReferences.filter((reference) => reference.tag === offsetTag);
+      const lengthEntries = localReferences.filter((reference) => reference.tag === lengthTag);
+      if (offsetEntries.length === 0 && lengthEntries.length === 0) return;
+      if (offsetEntries.length !== 1 || lengthEntries.length !== 1) {
+        unsafe(`${label} tiene pares incompletos o duplicados`);
+      }
+      const offsetEntry = offsetEntries[0];
+      const lengthEntry = lengthEntries[0];
+      if (
+        requireLongSingle &&
+        (offsetEntry.type !== 4 || lengthEntry.type !== 4 ||
+          offsetEntry.count !== 1 || lengthEntry.count !== 1)
+      ) {
+        unsafe(`${label} tiene tipos o cantidades inválidos`);
+      }
+      const offsets = readUnsignedValues(offsetEntry, label);
+      const lengths = readUnsignedValues(lengthEntry, label);
+      if (offsets.length !== lengths.length) unsafe(`${label} tiene cantidades distintas`);
+      offsets.forEach((payloadOffset, index) => {
+        const payloadLength = lengths[index];
+        if (payloadLength === 0) unsafe(`${label} declara un payload vacío`);
+        try {
+          assertRange(tiff, payloadOffset, payloadLength, "EXIF");
+        } catch {
+          unsafe(`${label} apunta fuera del bloque TIFF`);
+        }
+        const payloadRange: ValueReference = {
+          tag: offsetTag,
+          type: 7,
+          count: payloadLength,
+          offset: payloadOffset,
+          length: payloadLength,
+          entryOffset: -1000 - visualPayloadRanges.length,
+          critical: true,
+          suspect: false,
+        };
+        for (const structural of structuralRanges) {
+          if (overlaps(payloadRange, structural)) unsafe(`${label} invade la topología IFD`);
+        }
+        for (const existing of visualPayloadRanges) {
+          if (overlaps(payloadRange, existing)) unsafe(`${label} tiene payloads superpuestos`);
+        }
+        visualPayloadRanges.push(payloadRange);
+        references.push(payloadRange);
+        critical.push(checkedView(tiff, payloadOffset, payloadLength, "EXIF"));
+      });
+    };
+
+    resolvePayloadPairs(0x0111, 0x0117, "StripOffsets/StripByteCounts", false);
+    resolvePayloadPairs(0x0201, 0x0202, "JPEGInterchangeFormat", true);
+
     const nextOffsetPosition = ifdOffset + 2 + entriesLength;
+    critical.push(checkedView(tiff, nextOffsetPosition, 4, "EXIF"));
     const nextOffset = readUint32(tiff, nextOffsetPosition, littleEndian, "EXIF");
     if (nextOffset !== 0) visitIfd(nextOffset, depth + 1);
   };
@@ -283,6 +399,11 @@ function parseExif(tiff: Uint8Array): ParsedExif {
   }
 
   for (const match of matches) {
+    if (match.length > 4) {
+      for (const structural of structuralRanges) {
+        if (overlaps(match, structural)) unsafe("un valor sospechoso invade la topología IFD");
+      }
+    }
     for (const reference of references) {
       if (reference.entryOffset === match.entryOffset || reference.length === 0) continue;
       if (overlaps(match, reference)) unsafe("valores IFD superpuestos o aliased");

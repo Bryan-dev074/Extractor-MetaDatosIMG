@@ -56,8 +56,8 @@ const JFIF = jpegSegment(
 const DQT = jpegSegment(0xdb, Uint8Array.of(0, ...new Array(64).fill(1)));
 const DHT = jpegSegment(0xc4, Uint8Array.of(0, ...new Array(16).fill(0)));
 
-function sof(marker = 0xc0): Uint8Array {
-  return jpegSegment(marker, concat(Uint8Array.of(8), u16(1), u16(1), Uint8Array.of(1, 1, 0x11, 0)));
+function sof(marker = 0xc0, height = 1): Uint8Array {
+  return jpegSegment(marker, concat(Uint8Array.of(8), u16(height), u16(1), Uint8Array.of(1, 1, 0x11, 0)));
 }
 
 function sos(spectralStart = 0, spectralEnd = 63): Uint8Array {
@@ -108,23 +108,36 @@ export function progressiveJpegWithMetadataBetweenScans() {
   };
 }
 
+const C2PA_UUID = Uint8Array.of(
+  0x63, 0x32, 0x70, 0x61, 0x00, 0x11, 0x00, 0x10,
+  0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
+);
+
+function isoBox(type: string, payload: Uint8Array): Uint8Array {
+  return concat(u32(8 + payload.length), ascii(type), payload);
+}
+
+function identifiedJumbf(uuid: Uint8Array, label: string): Uint8Array {
+  const description = isoBox(
+    "jumd",
+    concat(uuid, Uint8Array.of(0x03), ascii(`${label}\0`)),
+  );
+  return isoBox("jumb", concat(description, isoBox("json", ascii("{}"))));
+}
+
+function c2paJumbf(): Uint8Array {
+  return identifiedJumbf(C2PA_UUID, "c2pa");
+}
+
 export function jpegWithApp11(jumbf: boolean): Uint8Array {
   const payload = jumbf
-    ? concat(
-        ascii("JP"),
-        u16(1),
-        u32(1),
-        u32(20),
-        ascii("jumb"),
-        ascii("c2pa-data-01"),
-      )
+    ? concat(ascii("JP"), u16(1), u32(1), c2paJumbf())
     : ascii("ordinary APP11 payload mentioning Midjourney but not JUMBF");
   return jpegDocument([jpegSegment(0xeb, payload)]);
 }
 
 export function jpegWithJumbfTrailingBytes(multipart: boolean): Uint8Array {
-  const data = ascii("c2pa-data");
-  const box = concat(u32(8 + data.length), ascii("jumb"), data);
+  const box = c2paJumbf();
   const framedWithGarbage = concat(box, Uint8Array.of(0xde, 0xad));
   if (!multipart) return jpegDocument([jpegSegment(0xeb, framedWithGarbage)]);
   const split = 11;
@@ -135,13 +148,77 @@ export function jpegWithJumbfTrailingBytes(multipart: boolean): Uint8Array {
 }
 
 export function jpegWithMultipartJumbf(): Uint8Array {
-  const data = ascii("c2pa-multipart-data");
-  const box = concat(u32(8 + data.length), ascii("jumb"), data);
+  const box = c2paJumbf();
   const split = 13;
   return jpegDocument([
     jpegSegment(0xeb, concat(ascii("JP"), u16(7), u32(1), box.slice(0, split))),
     jpegSegment(0xeb, concat(ascii("JP"), u16(7), u32(2), box.slice(split))),
   ]);
+}
+
+export function jpegWithNonC2paJumbf(
+  multipart: boolean,
+  description: "none" | "wrong-uuid" | "wrong-label" = "wrong-uuid",
+): Uint8Array {
+  const genericUuid = Uint8Array.of(
+    0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+    0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+  );
+  const box =
+    description === "none"
+      ? isoBox("jumb", isoBox("json", ascii("{\"kind\":\"not-c2pa\"}")))
+      : identifiedJumbf(
+          description === "wrong-uuid" ? genericUuid : C2PA_UUID,
+          description === "wrong-label" ? "not-c2pa" : "c2pa",
+        );
+  if (!multipart) return jpegDocument([jpegSegment(0xeb, box)]);
+  const split = Math.floor(box.length / 2);
+  return jpegDocument([
+    jpegSegment(0xeb, concat(ascii("JP"), u16(12), u32(1), box.slice(0, split))),
+    jpegSegment(0xeb, concat(ascii("JP"), u16(12), u32(2), box.slice(split))),
+  ]);
+}
+
+const XMP_HEADER = "http://ns.adobe.com/xap/1.0/\0";
+const EXTENDED_XMP_HEADER = "http://ns.adobe.com/xmp/extension/\0";
+
+function standardXmp(xml: string): Uint8Array {
+  return jpegSegment(0xe1, concat(ascii(XMP_HEADER), ascii(xml)));
+}
+
+export function jpegWithStandardXmp(kind: "safe-ai" | "mixed" | "presentation"): Uint8Array {
+  const ai = kind === "presentation" ? "" : "<xmp:CreatorTool>Midjourney</xmp:CreatorTool>";
+  const presentation =
+    kind === "safe-ai"
+      ? ""
+      : ' tiff:Orientation="6" crs:CropTop="0.125" crs:Exposure2012="0.40"';
+  const xml =
+    `<x:xmpmeta xmlns:x="adobe:ns:meta/">` +
+    `<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">` +
+    `<rdf:Description${presentation}>${ai}</rdf:Description>` +
+    `</rdf:RDF></x:xmpmeta>`;
+  return jpegDocument([standardXmp(xml)]);
+}
+
+export function jpegWithExtendedXmp(incomplete = false): Uint8Array {
+  const guid = "0123456789ABCDEF0123456789ABCDEF";
+  const extended = ascii(
+    `<rdf:RDF><rdf:Description><xmp:CreatorTool>Midjourney</xmp:CreatorTool>` +
+      `<crs:CropLeft>0.1</crs:CropLeft></rdf:Description></rdf:RDF>`,
+  );
+  const split = Math.min(100, extended.length - 1);
+  const fragment = (offset: number, data: Uint8Array) =>
+    jpegSegment(
+      0xe1,
+      concat(ascii(EXTENDED_XMP_HEADER), ascii(guid), u32(extended.length), u32(offset), data),
+    );
+  const main = standardXmp(
+    `<x:xmpmeta><rdf:RDF><rdf:Description xmpNote:HasExtendedXMP="${guid}"/>` +
+      `</rdf:RDF></x:xmpmeta>`,
+  );
+  const chunks = [fragment(0, extended.slice(0, split))];
+  if (!incomplete) chunks.push(fragment(split, extended.slice(split)));
+  return jpegDocument([main, ...chunks]);
 }
 
 export function jpegWithUnknownAppAiText(): Uint8Array {
@@ -224,6 +301,52 @@ export function jpegWithMixedExif(
   ]);
 }
 
+function littleEndianEntry(
+  tag: number,
+  type: number,
+  count: number,
+  valueOrOffset: number,
+): Uint8Array {
+  return concat(u16le(tag), u16le(type), u32le(count), u32le(valueOrOffset));
+}
+
+export function jpegWithIndirectExifAlias(kind: "thumbnail" | "strip"): Uint8Array {
+  const software = ascii("Midjourney\0");
+  const entryCount = 3;
+  const dataOffset = 8 + 2 + entryCount * 12 + 4;
+  const softwareEntry = littleEndianEntry(0x0131, 2, software.length, dataOffset);
+  const offsetTag = kind === "thumbnail" ? 0x0201 : 0x0111;
+  const lengthTag = kind === "thumbnail" ? 0x0202 : 0x0117;
+  const tiff = concat(
+    ascii("II"),
+    u16le(42),
+    u32le(8),
+    u16le(entryCount),
+    softwareEntry,
+    littleEndianEntry(offsetTag, 4, 1, dataOffset),
+    littleEndianEntry(lengthTag, 4, 1, software.length),
+    u32le(0),
+    software,
+  );
+  return jpegDocument([jpegSegment(0xe1, concat(ascii("Exif\0\0"), tiff))]);
+}
+
+export function jpegWithIfdTopologyOverlap(): Uint8Array {
+  const preIfdData = concat(ascii("Midjourney\0"), new Uint8Array(13));
+  const ifdOffset = 8 + preIfdData.length;
+  const valueLength = 2 + 12 + 4 + preIfdData.length;
+  const tiff = concat(
+    ascii("II"),
+    u16le(42),
+    u32le(ifdOffset),
+    preIfdData,
+    u16le(1),
+    littleEndianEntry(0x0131, 2, valueLength, 8),
+    u32le(0),
+  );
+  return jpegDocument([jpegSegment(0xe1, concat(ascii("Exif\0\0"), tiff))]);
+}
+
 export function readJpegExifOrientation(bytes: Uint8Array): number {
   const segment = jpegSegments(bytes, 0xe1)[0];
   const tiff = 10;
@@ -265,6 +388,19 @@ export function jpegWithBrokenIcc(kind: "missing" | "duplicate"): Uint8Array {
     );
   }
   return jpegDocument(chunks);
+}
+
+export function jpegWithDnl(
+  kind: "valid" | "missing" | "zero" | "bad-length" | "before-sos",
+): Uint8Array {
+  const dnl =
+    kind === "bad-length"
+      ? jpegSegment(0xdc, Uint8Array.of(0, 1, 0))
+      : jpegSegment(0xdc, u16(kind === "zero" ? 0 : 1));
+  const prefix = [SOI, JFIF, DQT, sof(0xc0, 0), DHT];
+  if (kind === "before-sos") return concat(...prefix, dnl, sos(), BASE_SCAN, EOI);
+  if (kind === "missing") return concat(...prefix, sos(), BASE_SCAN, EOI);
+  return concat(...prefix, sos(), BASE_SCAN, dnl, EOI);
 }
 
 export function extractJpegScans(bytes: Uint8Array): Uint8Array[] {
@@ -586,6 +722,21 @@ export function pngWithColorAndDensity(): Uint8Array {
     pngChunk("gAMA", u32(45455)),
     pngChunk("pHYs", concat(u32(11811), u32(11811), Uint8Array.of(1))),
   ]);
+}
+
+export function pngWithHighBitField(kind: "chunk-length" | "width" | "height"): Uint8Array {
+  if (kind === "chunk-length") {
+    return concat(PNG_SIGNATURE, u32(0x80000000), ascii("IDAT"));
+  }
+  const header = pngChunk(
+    "IHDR",
+    concat(
+      u32(kind === "width" ? 0x80000000 : 1),
+      u32(kind === "height" ? 0x80000000 : 1),
+      Uint8Array.of(8, 6, 0, 0, 0),
+    ),
+  );
+  return concat(PNG_SIGNATURE, header, IDAT, IEND);
 }
 
 export function extractPngPayloads(bytes: Uint8Array): Uint8Array[] {

@@ -12,7 +12,7 @@ describe("metadata cleaning facade", () => {
 
   it("cleans File-like input based on bytes and derives its output extension", async () => {
     const bytes = pngWithText("parameters", "Steps: 30");
-    const file = { arrayBuffer: async () => bytes.slice().buffer } as File;
+    const file = { size: bytes.length, arrayBuffer: async () => bytes.slice().buffer } as File;
     const result = await cleanImage(file);
 
     expect(result.format).toBe("png");
@@ -33,4 +33,3 @@ describe("metadata cleaning facade", () => {
     expect(result.qualityVerified).toBe(true);
   });
 });
-

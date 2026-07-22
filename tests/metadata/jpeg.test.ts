@@ -7,11 +7,17 @@ import {
   jpegSegments,
   jpegWithApp11,
   jpegWithComment,
+  jpegWithDnl,
+  jpegWithExtendedXmp,
+  jpegWithIfdTopologyOverlap,
+  jpegWithIndirectExifAlias,
   jpegWithJumbfTrailingBytes,
   jpegWithMixedExif,
   jpegWithMultipartJumbf,
   jpegWithMultipartIcc,
+  jpegWithNonC2paJumbf,
   jpegWithRepeatedMarkerFill,
+  jpegWithStandardXmp,
   jpegWithUnknownAppAiText,
   progressiveJpegWithMetadataBetweenScans,
   readJpegExifOrientation,
@@ -72,6 +78,24 @@ describe("strict lossless JPEG cleaning", () => {
     expect(result.qualityVerified).toBe(true);
   });
 
+  it("preserves generic and non-C2PA JUMBF after inspecting jumd identity", () => {
+    const sources = [
+      jpegWithNonC2paJumbf(false, "none"),
+      jpegWithNonC2paJumbf(false, "wrong-uuid"),
+      jpegWithNonC2paJumbf(false, "wrong-label"),
+      jpegWithNonC2paJumbf(true, "none"),
+      jpegWithNonC2paJumbf(true, "wrong-uuid"),
+      jpegWithNonC2paJumbf(true, "wrong-label"),
+    ];
+
+    for (const source of sources) {
+      const result = cleanBytes(source);
+      expect(result.cleaned).toEqual(source);
+      expect(result.findings).toHaveLength(0);
+      expect(result.qualityVerified).toBe(true);
+    }
+  });
+
   it("requires exact JUMBF box framing before removing APP11 bytes", () => {
     const direct = jpegWithJumbfTrailingBytes(false);
     const directResult = cleanBytes(direct);
@@ -120,6 +144,42 @@ describe("strict lossless JPEG cleaning", () => {
     }
   });
 
+  it("protects IFD topology and indirect thumbnail or strip payload ranges", () => {
+    for (const source of [
+      jpegWithIfdTopologyOverlap(),
+      jpegWithIndirectExifAlias("thumbnail"),
+      jpegWithIndirectExifAlias("strip"),
+    ]) {
+      expect(() => cleanBytes(source)).toThrow("EXIF no se puede limpiar de forma segura");
+    }
+  });
+
+  it("fails closed for AI-bearing XMP with orientation or Camera Raw presentation settings", () => {
+    expect(() => cleanBytes(jpegWithStandardXmp("mixed"))).toThrow(
+      "XMP JPEG no se puede limpiar de forma segura",
+    );
+  });
+
+  it("groups extended XMP by GUID and rejects suspect complete or incomplete packets", () => {
+    for (const incomplete of [false, true]) {
+      expect(() => cleanBytes(jpegWithExtendedXmp(incomplete))).toThrow(
+        "XMP extendido JPEG inválido o no editable de forma segura",
+      );
+    }
+  });
+
+  it("preserves presentation-only XMP and removes structurally safe AI-only XMP", () => {
+    const presentation = jpegWithStandardXmp("presentation");
+    const preserved = cleanBytes(presentation);
+    expect(preserved.cleaned).toEqual(presentation);
+    expect(preserved.qualityVerified).toBe(true);
+
+    const safeAi = jpegWithStandardXmp("safe-ai");
+    const cleaned = cleanBytes(safeAi);
+    expect(jpegSegments(cleaned.cleaned, 0xe1)).toHaveLength(0);
+    expect(cleaned.findings.length).toBeGreaterThan(0);
+  });
+
   it("traverses and preserves repeated FF fill bytes at a marker boundary", () => {
     const source = jpegWithRepeatedMarkerFill();
     const result = cleanBytes(source);
@@ -158,6 +218,18 @@ describe("strict lossless JPEG cleaning", () => {
   it("rejects incomplete or duplicate multipart ICC sequences", () => {
     for (const kind of ["missing", "duplicate"] as const) {
       expect(() => cleanBytes(jpegWithBrokenIcc(kind))).toThrow("Secuencia ICC JPEG inválida");
+    }
+  });
+
+  it("supports SOF height zero only when a valid post-SOS DNL supplies the height", () => {
+    const source = jpegWithDnl("valid");
+    const result = cleanBytes(source);
+    expect(extractJpegScans(result.cleaned)).toEqual(extractJpegScans(source));
+    expect(result.preserved.some((item) => item.detail.includes("1 × 1px"))).toBe(true);
+    expect(result.qualityVerified).toBe(true);
+
+    for (const kind of ["missing", "zero", "bad-length", "before-sos"] as const) {
+      expect(() => cleanBytes(jpegWithDnl(kind))).toThrow(/DNL JPEG/);
     }
   });
 });
