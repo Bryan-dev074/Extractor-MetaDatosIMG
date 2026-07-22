@@ -4,6 +4,10 @@ import { normalizeFiles, readDroppedItems } from "@/lib/batch/input";
 
 const JPEG_HEADER = Uint8Array.of(0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0);
 const PNG_HEADER = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+const SEPARATOR_ROOTS = [
+  { label: "slash", unsafe: "A/B" },
+  { label: "backslash", unsafe: "A\\B" },
+];
 
 function makeFile(
   name: string,
@@ -301,6 +305,50 @@ describe("readDroppedItems", () => {
     const result = await readDroppedItems(droppedItems([{ entry: empty }]));
 
     expect(result).toEqual({ archiveBase: "Vacía", accepted: [], skipped: [] });
+  });
+
+  it.each(SEPARATOR_ROOTS)(
+    "sanitizes $label in an empty dropped root without creating hierarchy",
+    async ({ unsafe }) => {
+      const empty = directoryEntry(unsafe, [[]]);
+
+      const result = await readDroppedItems(droppedItems([{ entry: empty }]));
+
+      expect(result).toEqual({ archiveBase: "A_B", accepted: [], skipped: [] });
+      expect(result.archiveBase).not.toContain("/");
+      expect(result.archiveBase).not.toContain("\\");
+    },
+  );
+
+  it.each(SEPARATOR_ROOTS)(
+    "sanitizes $label in a nonempty dropped root without creating hierarchy",
+    async ({ unsafe }) => {
+      const root = directoryEntry(unsafe, [[fileEntry(makeFile("foto.jpg"))], []]);
+
+      const result = await readDroppedItems(droppedItems([{ entry: root }]));
+
+      expect(result.archiveBase).toBe("A_B");
+      expect(result.accepted).toEqual([
+        expect.objectContaining({ relativePath: "A_B/foto.jpg", format: "jpeg" }),
+      ]);
+      expect(result.accepted[0].relativePath.split("/")).toHaveLength(2);
+    },
+  );
+
+  it("disambiguates slash and backslash roots after they sanitize to the same name", async () => {
+    const slash = directoryEntry("A/B", [[fileEntry(makeFile("uno.jpg"))], []]);
+    const backslash = directoryEntry("A\\B", [[fileEntry(makeFile("dos.jpg"))], []]);
+
+    const result = await readDroppedItems(
+      droppedItems([{ entry: slash }, { entry: backslash }]),
+    );
+
+    expect(result.archiveBase).toBe("imagenes-procesadas");
+    expect(result.accepted.map((item) => item.relativePath)).toEqual([
+      "A_B (2)/dos.jpg",
+      "A_B/uno.jpg",
+    ]);
+    expect(result.accepted.every((item) => item.relativePath.split("/").length === 2)).toBe(true);
   });
 
   it("keeps same-named dropped roots distinct using stable item order", async () => {

@@ -1,4 +1,4 @@
-const WINDOWS_INVALID_CHARACTERS = /[<>:"|?*]/g;
+const WINDOWS_INVALID_CHARACTERS = /[<>:"/\\|?*]/g;
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
 const RESERVED_WINDOWS_BASENAME = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
 
