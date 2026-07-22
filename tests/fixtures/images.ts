@@ -186,16 +186,31 @@ function standardXmp(xml: string): Uint8Array {
   return jpegSegment(0xe1, concat(ascii(XMP_HEADER), ascii(xml)));
 }
 
-export function jpegWithStandardXmp(kind: "safe-ai" | "mixed" | "presentation"): Uint8Array {
+export function jpegWithStandardXmp(
+  kind: "safe-ai" | "mixed" | "presentation" | "renamed-presentation" | "mixed-benign" | "malformed-ai",
+): Uint8Array {
+  if (kind === "malformed-ai") {
+    return jpegDocument([
+      standardXmp(
+        `<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:xmp="http://ns.adobe.com/xap/1.0/">` +
+          `<rdf:RDF><rdf:Description><xmp:CreatorTool>Midjourney</rdf:Description></rdf:RDF></x:xmpmeta>`,
+      ),
+    ]);
+  }
   const ai = kind === "presentation" ? "" : "<xmp:CreatorTool>Midjourney</xmp:CreatorTool>";
   const presentation =
-    kind === "safe-ai"
-      ? ""
-      : ' tiff:Orientation="6" crs:CropTop="0.125" crs:Exposure2012="0.40"';
+    kind === "mixed" || kind === "presentation"
+      ? ' tiff:Orientation="6" crs:CropTop="0.125" crs:Exposure2012="0.40"'
+      : kind === "renamed-presentation"
+        ? ' p:Orientation="6"'
+        : "";
+  const benign = kind === "mixed-benign" ? "<dc:title>Ordinary title</dc:title>" : "";
   const xml =
-    `<x:xmpmeta xmlns:x="adobe:ns:meta/">` +
-    `<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">` +
-    `<rdf:Description${presentation}>${ai}</rdf:Description>` +
+    `<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" ` +
+    `xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:tiff="http://ns.adobe.com/tiff/1.0/" ` +
+    `xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/" ` +
+    `xmlns:p="http://ns.adobe.com/tiff/1.0/">` +
+    `<rdf:RDF><rdf:Description${presentation}>${ai}${benign}</rdf:Description>` +
     `</rdf:RDF></x:xmpmeta>`;
   return jpegDocument([standardXmp(xml)]);
 }
@@ -203,7 +218,7 @@ export function jpegWithStandardXmp(kind: "safe-ai" | "mixed" | "presentation"):
 export function jpegWithExtendedXmp(incomplete = false): Uint8Array {
   const guid = "0123456789ABCDEF0123456789ABCDEF";
   const extended = ascii(
-    `<rdf:RDF><rdf:Description><xmp:CreatorTool>Midjourney</xmp:CreatorTool>` +
+    `<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"><rdf:Description><xmp:CreatorTool>Midjourney</xmp:CreatorTool>` +
       `<crs:CropLeft>0.1</crs:CropLeft></rdf:Description></rdf:RDF>`,
   );
   const split = Math.min(100, extended.length - 1);
@@ -213,12 +228,32 @@ export function jpegWithExtendedXmp(incomplete = false): Uint8Array {
       concat(ascii(EXTENDED_XMP_HEADER), ascii(guid), u32(extended.length), u32(offset), data),
     );
   const main = standardXmp(
-    `<x:xmpmeta><rdf:RDF><rdf:Description xmpNote:HasExtendedXMP="${guid}"/>` +
+    `<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:xmpNote="http://ns.adobe.com/xmp/note/"><rdf:RDF><rdf:Description xmpNote:HasExtendedXMP="${guid}"/>` +
       `</rdf:RDF></x:xmpmeta>`,
   );
   const chunks = [fragment(0, extended.slice(0, split))];
   if (!incomplete) chunks.push(fragment(split, extended.slice(split)));
   return jpegDocument([main, ...chunks]);
+}
+
+export function jpegWithElementLinkedExtendedXmp(
+  kind: "ai-main" | "malformed-guid",
+): Uint8Array {
+  const guid = kind === "malformed-guid" ? "NOT-A-VALID-GUID" : "FEDCBA9876543210FEDCBA9876543210";
+  const extensionGuid = "FEDCBA9876543210FEDCBA9876543210";
+  const extended = ascii(
+    `<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:xmp="http://ns.adobe.com/xap/1.0/"><rdf:Description><xmp:Label>ordinary extension</xmp:Label></rdf:Description></rdf:RDF>`,
+  );
+  const main = standardXmp(
+    `<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:n="http://ns.adobe.com/xmp/note/" xmlns:xmp="http://ns.adobe.com/xap/1.0/"><rdf:RDF><rdf:Description>` +
+      `<n:HasExtendedXMP>${guid}</n:HasExtendedXMP><xmp:CreatorTool>Midjourney</xmp:CreatorTool>` +
+      `</rdf:Description></rdf:RDF></x:xmpmeta>`,
+  );
+  const fragment = jpegSegment(
+    0xe1,
+    concat(ascii(EXTENDED_XMP_HEADER), ascii(extensionGuid), u32(extended.length), u32(0), extended),
+  );
+  return jpegDocument([main, fragment]);
 }
 
 export function jpegWithUnknownAppAiText(): Uint8Array {
@@ -347,6 +382,25 @@ export function jpegWithIfdTopologyOverlap(): Uint8Array {
   return jpegDocument([jpegSegment(0xe1, concat(ascii("Exif\0\0"), tiff))]);
 }
 
+export function jpegWithPartiallyOverlappingIfds(): Uint8Array {
+  const software = ascii("Midjourney\0");
+  const parentIfdOffset = 8;
+  const childIfdOffset = 34;
+  const softwareOffset = 40;
+  const tiff = concat(
+    ascii("II"),
+    u16le(42),
+    u32le(parentIfdOffset),
+    u16le(2),
+    littleEndianEntry(0x0131, 2, software.length, softwareOffset),
+    littleEndianEntry(0x8769, 4, 1, childIfdOffset),
+    u32le(0),
+    u16le(0),
+    software,
+  );
+  return jpegDocument([jpegSegment(0xe1, concat(ascii("Exif\0\0"), tiff))]);
+}
+
 export function readJpegExifOrientation(bytes: Uint8Array): number {
   const segment = jpegSegments(bytes, 0xe1)[0];
   const tiff = 10;
@@ -391,16 +445,54 @@ export function jpegWithBrokenIcc(kind: "missing" | "duplicate"): Uint8Array {
 }
 
 export function jpegWithDnl(
-  kind: "valid" | "missing" | "zero" | "bad-length" | "before-sos",
+  kind:
+    | "valid"
+    | "valid-nonzero"
+    | "conflicting-nonzero"
+    | "missing"
+    | "zero"
+    | "bad-length"
+    | "before-sos"
+    | "delayed"
+    | "duplicate"
+    | "late-second-scan",
 ): Uint8Array {
+  if (kind === "late-second-scan") {
+    return concat(
+      SOI,
+      JFIF,
+      DQT,
+      sof(0xc2, 0),
+      DHT,
+      sos(0, 0),
+      Uint8Array.of(0x10),
+      DHT,
+      sos(1, 63),
+      Uint8Array.of(0x20),
+      jpegSegment(0xdc, u16(1)),
+      EOI,
+    );
+  }
+  const nonzeroSof = kind === "valid-nonzero" || kind === "conflicting-nonzero";
   const dnl =
     kind === "bad-length"
       ? jpegSegment(0xdc, Uint8Array.of(0, 1, 0))
-      : jpegSegment(0xdc, u16(kind === "zero" ? 0 : 1));
-  const prefix = [SOI, JFIF, DQT, sof(0xc0, 0), DHT];
+      : jpegSegment(0xdc, u16(kind === "zero" ? 0 : kind === "conflicting-nonzero" ? 2 : 1));
+  const prefix = [SOI, JFIF, DQT, sof(0xc0, nonzeroSof ? 1 : 0), DHT];
   if (kind === "before-sos") return concat(...prefix, dnl, sos(), BASE_SCAN, EOI);
   if (kind === "missing") return concat(...prefix, sos(), BASE_SCAN, EOI);
+  if (kind === "delayed") {
+    return concat(...prefix, sos(), BASE_SCAN, jpegSegment(0xfe, ascii("ordinary")), dnl, EOI);
+  }
+  if (kind === "duplicate") return concat(...prefix, sos(), BASE_SCAN, dnl, dnl, EOI);
   return concat(...prefix, sos(), BASE_SCAN, dnl, EOI);
+}
+
+export function jpegWithMarkerFlood(count = 20_000): Uint8Array {
+  const marker = jpegSegment(0xfe, new Uint8Array());
+  const metadata = new Uint8Array(marker.length * count);
+  for (let index = 0; index < count; index += 1) metadata.set(marker, index * marker.length);
+  return jpegDocument([metadata]);
 }
 
 export function extractJpegScans(bytes: Uint8Array): Uint8Array[] {
@@ -737,6 +829,84 @@ export function pngWithHighBitField(kind: "chunk-length" | "width" | "height"): 
     ),
   );
   return concat(PNG_SIGNATURE, header, IDAT, IEND);
+}
+
+export function pngWithHighBitSemantic(
+  kind:
+    | "phys-x"
+    | "phys-y"
+    | "gama"
+    | "chrm"
+    | "actl-frames"
+    | "actl-plays"
+    | "fctl-sequence"
+    | "fctl-width"
+    | "fctl-height"
+    | "fctl-x"
+    | "fctl-y"
+    | "fdat-sequence",
+): Uint8Array {
+  const high = 0x80000000;
+  if (kind === "phys-x" || kind === "phys-y") {
+    return pngDocument([
+      pngChunk(
+        "pHYs",
+        concat(u32(kind === "phys-x" ? high : 1), u32(kind === "phys-y" ? high : 1), Uint8Array.of(1)),
+      ),
+    ]);
+  }
+  if (kind === "gama") return pngDocument([pngChunk("gAMA", u32(high))]);
+  if (kind === "chrm") {
+    return pngDocument([pngChunk("cHRM", concat(u32(high), ...new Array(7).fill(null).map(() => u32(1))))]);
+  }
+  const frameControl = (sequence: number, width: number, height: number, x: number, y: number) =>
+    pngChunk(
+      "fcTL",
+      concat(u32(sequence), u32(width), u32(height), u32(x), u32(y), u16(1), u16(30), Uint8Array.of(0, 0)),
+    );
+  if (kind === "actl-frames" || kind === "actl-plays") {
+    return concat(
+      PNG_SIGNATURE,
+      IHDR,
+      pngChunk("acTL", concat(u32(kind === "actl-frames" ? high : 1), u32(kind === "actl-plays" ? high : 0))),
+      frameControl(0, 1, 1, 0, 0),
+      IDAT,
+      IEND,
+    );
+  }
+  if (kind === "fdat-sequence") {
+    return concat(
+      PNG_SIGNATURE,
+      IHDR,
+      pngChunk("acTL", concat(u32(2), u32(0))),
+      frameControl(0, 1, 1, 0, 0),
+      IDAT,
+      frameControl(1, 1, 1, 0, 0),
+      pngChunk("fdAT", concat(u32(high), Uint8Array.of(1))),
+      IEND,
+    );
+  }
+  return concat(
+    PNG_SIGNATURE,
+    IHDR,
+    pngChunk("acTL", concat(u32(1), u32(0))),
+    frameControl(
+      kind === "fctl-sequence" ? high : 0,
+      kind === "fctl-width" ? high : 1,
+      kind === "fctl-height" ? high : 1,
+      kind === "fctl-x" ? high : 0,
+      kind === "fctl-y" ? high : 0,
+    ),
+    IDAT,
+    IEND,
+  );
+}
+
+export function pngWithChunkFlood(count = 20_000): Uint8Array {
+  const chunk = pngChunk("vpAg", new Uint8Array());
+  const metadata = new Uint8Array(chunk.length * count);
+  for (let index = 0; index < count; index += 1) metadata.set(chunk, index * chunk.length);
+  return pngDocument([metadata]);
 }
 
 export function extractPngPayloads(bytes: Uint8Array): Uint8Array[] {

@@ -1,3 +1,4 @@
+import { DOMParser } from "@xmldom/xmldom";
 import { scanForAi } from "../signatures";
 import type { CleanResult, Finding, PreservedItem } from "../types";
 import {
@@ -46,6 +47,7 @@ const STRUCTURAL_CRITICAL_MARKERS = new Set([
   0xee,
 ]);
 const MAX_METADATA_SCAN = 1_048_576;
+const MAX_JPEG_TOKENS = 16_384;
 
 interface SegmentToken {
   kind: "segment";
@@ -94,8 +96,20 @@ interface XmpAnalysis {
 
 const XMP_HEADER = "http://ns.adobe.com/xap/1.0/\0";
 const EXTENDED_XMP_HEADER = "http://ns.adobe.com/xmp/extension/\0";
-const XMP_PRESENTATION_PATTERN =
-  /\b(?:crs:[A-Za-z0-9_]+|tiff:(?:Orientation|XResolution|YResolution|ResolutionUnit|ImageWidth|ImageLength)|exif:(?:Orientation|ColorSpace|PixelXDimension|PixelYDimension)|photoshop:(?:ICCProfile|ColorMode))\b/i;
+const RDF_NAMESPACE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+const XMP_META_NAMESPACE = "adobe:ns:meta/";
+const XMP_NAMESPACE = "http://ns.adobe.com/xap/1.0/";
+const XMP_NOTE_NAMESPACE = "http://ns.adobe.com/xmp/note/";
+const XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace";
+const XMLNS_NAMESPACE = "http://www.w3.org/2000/xmlns/";
+const XMP_PRESENTATION_NAMESPACES = new Set([
+  "http://ns.adobe.com/tiff/1.0/",
+  "http://ns.adobe.com/exif/1.0/",
+  "http://ns.adobe.com/exif/1.0/aux/",
+  "http://ns.adobe.com/camera-raw-settings/1.0/",
+  "http://ns.adobe.com/photoshop/1.0/",
+]);
+const RDF_STRUCTURAL_ELEMENTS = new Set(["RDF", "Description", "Alt", "Bag", "Seq", "li"]);
 
 function truncated(): never {
   throw new Error("JPEG truncado.");
@@ -129,6 +143,14 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
   let sawEoi = false;
   let needsDnl = false;
   let sawDnl = false;
+  let sofHeight: number | null = null;
+  let completedScans = 0;
+  const pushToken = (token: JpegToken): void => {
+    if (tokens.length >= MAX_JPEG_TOKENS) {
+      throw new Error("JPEG excede el límite seguro de marcadores JPEG.");
+    }
+    tokens.push(token);
+  };
 
   while (offset < bytes.length) {
     jpegRange(bytes, offset, 2);
@@ -152,7 +174,7 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
       if (markerEnd !== bytes.length) {
         throw new Error("Estructura JPEG inválida: bytes después de EOI.");
       }
-      tokens.push({
+      pushToken({
         kind: "eoi",
         marker,
         start: markerStart,
@@ -168,7 +190,7 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
       if (marker >= 0xd0 && marker <= 0xd7) {
         throw new Error("Estructura JPEG inválida: reinicio fuera del scan.");
       }
-      tokens.push({
+      pushToken({
         kind: "standalone",
         marker,
         start: markerStart,
@@ -196,7 +218,7 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
       raw: checkedView(bytes, markerStart, segmentEnd - markerStart, "JPEG"),
       payload: checkedView(bytes, payloadStart, payloadEnd - payloadStart, "JPEG"),
     };
-    tokens.push(token);
+    pushToken(token);
 
     if (SOF_MARKERS.has(marker)) {
       if (sawSof || sawSos) throw new Error("Orden de marcadores JPEG inválido.");
@@ -209,6 +231,7 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
       const width = readUint16BE(bytes, payloadStart + 3, "JPEG");
       if (width === 0) throw new Error("Dimensiones JPEG inválidas.");
       needsDnl = height === 0;
+      sofHeight = height;
       dimensions = { width, height };
       sawSof = true;
     }
@@ -238,12 +261,23 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
     }
 
     if (marker === 0xdc) {
-      if (!sawSos) throw new Error("DNL JPEG inválido: debe aparecer después de SOS.");
-      if (!needsDnl || sawDnl || segmentLength !== 4 || !dimensions) {
+      const previous = tokens[tokens.length - 2];
+      if (
+        !sawSos ||
+        sawDnl ||
+        segmentLength !== 4 ||
+        !dimensions ||
+        sofHeight === null ||
+        completedScans !== 1 ||
+        previous?.kind !== "scan"
+      ) {
         throw new Error("DNL JPEG inválido: orden o longitud incorrectos.");
       }
       const lineCount = readUint16BE(bytes, payloadStart, "JPEG DNL");
       if (lineCount === 0) throw new Error("DNL JPEG inválido: altura cero.");
+      if (sofHeight !== 0 && lineCount !== sofHeight) {
+        throw new Error("DNL JPEG inválido: altura contradictoria.");
+      }
       dimensions = { width: dimensions.width, height: lineCount };
       sawDnl = true;
     }
@@ -256,6 +290,9 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
     }
 
     if (!sawSof) throw new Error("Orden de marcadores JPEG inválido: SOS antes de SOF.");
+    if (sawSos && needsDnl && !sawDnl) {
+      throw new Error("DNL JPEG faltante antes del segundo scan.");
+    }
     const componentCount = readUint8(bytes, payloadStart, "JPEG SOS");
     if (componentCount === 0 || segmentLength !== 6 + componentCount * 2) {
       throw new Error("Cabecera SOS JPEG inválida.");
@@ -281,8 +318,12 @@ function parseJpeg(bytes: Uint8Array): ParsedJpeg {
         continue;
       }
       const scan = checkedView(bytes, segmentEnd, prefix - segmentEnd, "JPEG scan");
+      if (tokens.length >= MAX_JPEG_TOKENS) {
+        throw new Error("JPEG excede el límite seguro de marcadores JPEG.");
+      }
       scans.push(scan);
-      tokens.push({ kind: "scan", start: segmentEnd, end: prefix, raw: scan });
+      completedScans += 1;
+      pushToken({ kind: "scan", start: segmentEnd, end: prefix, raw: scan });
       offset = prefix;
       break;
     }
@@ -329,8 +370,108 @@ function decodeXmp(bytes: Uint8Array): string {
   }
 }
 
-function structurallyCompleteXmp(text: string): boolean {
-  return /<rdf:RDF\b/i.test(text) && /<\/rdf:RDF\s*>/i.test(text);
+interface XmpStructure {
+  extendedGuids: string[];
+  hasPresentation: boolean;
+  hasUnknownProperties: boolean;
+  safeCarrierText: string;
+}
+
+function inspectXmpStructure(text: string, extended: boolean): XmpStructure {
+  const fail = (detail: string): never => {
+    if (extended) {
+      throw new Error(
+        `XMP extendido JPEG inválido o no editable de forma segura: ${detail}.`,
+      );
+    }
+    throw new Error(`XMP JPEG no se puede limpiar de forma segura: ${detail}.`);
+  };
+  if (/<!DOCTYPE\b/i.test(text)) fail("DTD no permitido");
+
+  const document = (() => {
+    try {
+      return new DOMParser({
+        locator: false,
+        onError: (_level, message) => {
+          throw new Error(message);
+        },
+      }).parseFromString(text, "application/xml");
+    } catch {
+      return fail("XML malformado");
+    }
+  })();
+
+  const root = document.documentElement;
+  if (!root) fail("XML sin elemento raíz");
+  const elements = document.getElementsByTagName("*");
+  const extendedGuids = new Set<string>();
+  const safeCarrierText: string[] = [];
+  let referenceCount = 0;
+  let rdfCount = 0;
+  let hasPresentation = false;
+  let hasUnknownProperties = false;
+
+  const registerGuid = (value: string): void => {
+    referenceCount += 1;
+    const guid = value.trim();
+    if (!/^[0-9A-Fa-f]{32}$/.test(guid)) fail("referencia HasExtendedXMP inválida");
+    extendedGuids.add(guid.toUpperCase());
+  };
+
+  for (let index = 0; index < elements.length; index += 1) {
+    const element = elements.item(index);
+    if (!element) continue;
+    const namespace = element.namespaceURI ?? "";
+    const localName = element.localName ?? element.nodeName.split(":").at(-1) ?? "";
+    const structural =
+      (namespace === XMP_META_NAMESPACE && localName === "xmpmeta") ||
+      (namespace === RDF_NAMESPACE && RDF_STRUCTURAL_ELEMENTS.has(localName));
+
+    if (namespace === RDF_NAMESPACE && localName === "RDF") rdfCount += 1;
+    if (namespace === XMP_NAMESPACE && localName === "CreatorTool") {
+      safeCarrierText.push(element.textContent ?? "");
+    } else if (namespace === XMP_NOTE_NAMESPACE && localName === "HasExtendedXMP") {
+      registerGuid(element.textContent ?? "");
+    } else if (XMP_PRESENTATION_NAMESPACES.has(namespace)) {
+      hasPresentation = true;
+    } else if (!structural) {
+      hasUnknownProperties = true;
+    }
+
+    for (let attributeIndex = 0; attributeIndex < element.attributes.length; attributeIndex += 1) {
+      const attribute = element.attributes.item(attributeIndex);
+      if (!attribute) continue;
+      const attributeNamespace = attribute.namespaceURI ?? "";
+      const attributeLocal = attribute.localName ?? attribute.nodeName.split(":").at(-1) ?? "";
+      if (
+        attributeNamespace === XMLNS_NAMESPACE ||
+        attribute.nodeName === "xmlns" ||
+        attribute.nodeName.startsWith("xmlns:") ||
+        attributeNamespace === XML_NAMESPACE ||
+        (attributeNamespace === RDF_NAMESPACE && attributeLocal === "about")
+      ) {
+        continue;
+      }
+      if (attributeNamespace === XMP_NOTE_NAMESPACE && attributeLocal === "HasExtendedXMP") {
+        registerGuid(attribute.value);
+      } else if (attributeNamespace === XMP_NAMESPACE && attributeLocal === "CreatorTool") {
+        safeCarrierText.push(attribute.value);
+      } else if (XMP_PRESENTATION_NAMESPACES.has(attributeNamespace)) {
+        hasPresentation = true;
+      } else {
+        hasUnknownProperties = true;
+      }
+    }
+  }
+
+  if (rdfCount !== 1) fail("estructura RDF ambigua");
+  if (referenceCount !== extendedGuids.size) fail("referencias HasExtendedXMP ambiguas");
+  return {
+    extendedGuids: [...extendedGuids],
+    hasPresentation,
+    hasUnknownProperties,
+    safeCarrierText: safeCarrierText.join("\n"),
+  };
 }
 
 function analyzeXmp(tokens: readonly JpegToken[]): XmpAnalysis {
@@ -353,18 +494,23 @@ function analyzeXmp(tokens: readonly JpegToken[]): XmpAnalysis {
       );
       const text = decodeXmp(packet);
       const hits = scanForAi(text);
-      const hasPresentation = XMP_PRESENTATION_PATTERN.test(text);
-      const extendedMatch = /HasExtendedXMP\s*=\s*["']([0-9A-Fa-f]{32})["']/i.exec(text);
-      if (extendedMatch) referencedGuids.add(extendedMatch[1].toUpperCase());
+      const structure = inspectXmpStructure(text, false);
+      for (const guid of structure.extendedGuids) referencedGuids.add(guid);
+      const linked = structure.extendedGuids.length > 0;
       if (hits.length > 0) {
-        if (hasPresentation || extendedMatch || !structurallyCompleteXmp(text)) {
+        if (
+          structure.hasPresentation ||
+          structure.hasUnknownProperties ||
+          linked ||
+          scanForAi(structure.safeCarrierText).length === 0
+        ) {
           throw new Error(
             "XMP JPEG no se puede limpiar de forma segura: contiene datos de presentación o estructura mixta.",
           );
         }
         removals.set(index, hits);
       }
-      if (hasPresentation) presentation.push(token.raw);
+      if (structure.hasPresentation || linked) presentation.push(token.raw);
       return;
     }
     if (!startsWithAscii(token.payload, EXTENDED_XMP_HEADER)) return;
@@ -405,6 +551,11 @@ function analyzeXmp(tokens: readonly JpegToken[]): XmpAnalysis {
   }
 
   for (const [guid, fragments] of extensionGroups) {
+    if (!referencedGuids.has(guid)) {
+      throw new Error(
+        "XMP extendido JPEG inválido o no editable de forma segura: grupo sin referencia principal.",
+      );
+    }
     fragments.sort((left, right) => left.offset - right.offset);
     const total = fragments[0].total;
     if (fragments.some((fragment) => fragment.total !== total)) {
@@ -422,17 +573,18 @@ function analyzeXmp(tokens: readonly JpegToken[]): XmpAnalysis {
     }
     const packet = concatBytes(fragments.map((fragment) => fragment.data), "JPEG XMP extendido");
     const text = decodeXmp(packet);
+    const structure = inspectXmpStructure(text, true);
     if (scanForAi(text).length > 0) {
       throw new Error(
         "XMP extendido JPEG inválido o no editable de forma segura: paquete sospechoso.",
       );
     }
-    if (XMP_PRESENTATION_PATTERN.test(text)) {
-      presentation.push(...fragments.map((fragment) => fragment.raw));
+    if (structure.extendedGuids.length > 0) {
+      throw new Error(
+        "XMP extendido JPEG inválido o no editable de forma segura: referencia extendida anidada.",
+      );
     }
-    if (referencedGuids.has(guid) && !structurallyCompleteXmp(text)) {
-      throw new Error("XMP extendido JPEG inválido o no editable de forma segura: XML incompleto.");
-    }
+    presentation.push(...fragments.map((fragment) => fragment.raw));
   }
 
   return { removals, presentation };

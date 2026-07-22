@@ -211,6 +211,9 @@ function parseExif(tiff: Uint8Array): ParsedExif {
       critical: true,
       suspect: false,
     };
+    for (const existing of structuralRanges) {
+      if (overlaps(topology, existing)) unsafe("topologías IFD parcialmente superpuestas");
+    }
     structuralRanges.push(topology);
     for (const visual of visualPayloadRanges) {
       if (overlaps(topology, visual)) unsafe("un payload visual invade la topología IFD");

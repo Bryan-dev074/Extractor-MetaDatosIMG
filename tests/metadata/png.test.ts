@@ -5,12 +5,14 @@ import {
   apngWithAiText,
   extractPngPayloads,
   pngChunks,
+  pngWithChunkFlood,
   pngWithC2pa,
   pngWithColorAndDensity,
   pngWithCompressedInternationalText,
   pngWithCompressedText,
   pngWithInvalidOrder,
   pngWithHighBitField,
+  pngWithHighBitSemantic,
   pngWithMalformedText,
   pngWithText,
   pngWithUnknownChunk,
@@ -146,5 +148,30 @@ describe("strict lossless PNG cleaning", () => {
         "PNG fuera del rango de 31 bits",
       );
     }
+  });
+
+  it("applies the uint31 bound to color, density, and APNG semantic integers", () => {
+    for (const kind of [
+      "phys-x",
+      "phys-y",
+      "gama",
+      "chrm",
+      "actl-frames",
+      "actl-plays",
+      "fctl-sequence",
+      "fctl-width",
+      "fctl-height",
+      "fctl-x",
+      "fctl-y",
+      "fdat-sequence",
+    ] as const) {
+      expect(() => cleanBytes(pngWithHighBitSemantic(kind))).toThrow(
+        "PNG fuera del rango de 31 bits",
+      );
+    }
+  });
+
+  it("caps PNG chunk growth well below the global byte limit", () => {
+    expect(() => cleanBytes(pngWithChunkFlood())).toThrow(/límite.*chunks PNG/i);
   });
 });

@@ -8,14 +8,17 @@ import {
   jpegWithApp11,
   jpegWithComment,
   jpegWithDnl,
+  jpegWithElementLinkedExtendedXmp,
   jpegWithExtendedXmp,
   jpegWithIfdTopologyOverlap,
   jpegWithIndirectExifAlias,
   jpegWithJumbfTrailingBytes,
   jpegWithMixedExif,
+  jpegWithMarkerFlood,
   jpegWithMultipartJumbf,
   jpegWithMultipartIcc,
   jpegWithNonC2paJumbf,
+  jpegWithPartiallyOverlappingIfds,
   jpegWithRepeatedMarkerFill,
   jpegWithStandardXmp,
   jpegWithUnknownAppAiText,
@@ -154,10 +157,38 @@ describe("strict lossless JPEG cleaning", () => {
     }
   });
 
+  it("rejects partially overlapping parent and child IFD tables", () => {
+    expect(() => cleanBytes(jpegWithPartiallyOverlappingIfds())).toThrow(
+      "EXIF no se puede limpiar de forma segura",
+    );
+  });
+
   it("fails closed for AI-bearing XMP with orientation or Camera Raw presentation settings", () => {
     expect(() => cleanBytes(jpegWithStandardXmp("mixed"))).toThrow(
       "XMP JPEG no se puede limpiar de forma segura",
     );
+  });
+
+  it("resolves XMP presentation properties by namespace URI instead of prefix spelling", () => {
+    expect(() => cleanBytes(jpegWithStandardXmp("renamed-presentation"))).toThrow(
+      "XMP JPEG no se puede limpiar de forma segura",
+    );
+  });
+
+  it("rejects malformed or mixed-property AI-bearing standard XMP", () => {
+    for (const kind of ["malformed-ai", "mixed-benign"] as const) {
+      expect(() => cleanBytes(jpegWithStandardXmp(kind))).toThrow(
+        "XMP JPEG no se puede limpiar de forma segura",
+      );
+    }
+  });
+
+  it("treats an element-form extended-XMP link and its GUID group as indivisible", () => {
+    for (const kind of ["ai-main", "malformed-guid"] as const) {
+      expect(() => cleanBytes(jpegWithElementLinkedExtendedXmp(kind))).toThrow(
+        "XMP JPEG no se puede limpiar de forma segura",
+      );
+    }
   });
 
   it("groups extended XMP by GUID and rejects suspect complete or incomplete packets", () => {
@@ -231,5 +262,20 @@ describe("strict lossless JPEG cleaning", () => {
     for (const kind of ["missing", "zero", "bad-length", "before-sos"] as const) {
       expect(() => cleanBytes(jpegWithDnl(kind))).toThrow(/DNL JPEG/);
     }
+  });
+
+  it("accepts only a consistent DNL immediately after scan one", () => {
+    const source = jpegWithDnl("valid-nonzero");
+    const result = cleanBytes(source);
+    expect(result.cleaned).toEqual(source);
+    expect(result.qualityVerified).toBe(true);
+
+    for (const kind of ["conflicting-nonzero", "delayed", "duplicate", "late-second-scan"] as const) {
+      expect(() => cleanBytes(jpegWithDnl(kind))).toThrow(/DNL JPEG/);
+    }
+  });
+
+  it("caps JPEG marker growth well below the global byte limit", () => {
+    expect(() => cleanBytes(jpegWithMarkerFlood())).toThrow(/límite.*marcadores JPEG/i);
   });
 });

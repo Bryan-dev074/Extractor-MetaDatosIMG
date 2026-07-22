@@ -46,6 +46,7 @@ const KNOWN_ANCILLARY = new Set([
   "tIME",
 ]);
 const MAX_TEXT_BYTES = 1_048_576;
+const MAX_PNG_CHUNKS = 16_384;
 const SINGLETON_CHUNKS = new Set([
   "IHDR",
   "PLTE",
@@ -102,6 +103,12 @@ function pngRange(bytes: Uint8Array, offset: number, length: number): void {
   } catch {
     truncated();
   }
+}
+
+function readUint31(bytes: Uint8Array, offset: number, label: string): number {
+  const value = readUint32BE(bytes, offset, label);
+  if (value > 0x7fffffff) throw new Error(`PNG fuera del rango de 31 bits: ${label}.`);
+  return value;
 }
 
 function findNull(data: Uint8Array, start: number, label: string): number {
@@ -253,9 +260,11 @@ function parsePng(bytes: Uint8Array): ParsedPng {
   const chunkCounts = new Map<string, number>();
 
   while (offset < bytes.length) {
+    if (chunks.length >= MAX_PNG_CHUNKS) {
+      throw new Error("PNG excede el límite seguro de chunks PNG.");
+    }
     pngRange(bytes, offset, 8);
-    const length = readUint32BE(bytes, offset, "PNG");
-    if (length > 0x7fffffff) throw new Error("PNG fuera del rango de 31 bits: longitud de chunk.");
+    const length = readUint31(bytes, offset, "longitud de chunk PNG");
     const type = readAscii(bytes, offset + 4, 4, "PNG");
     if (!/^[A-Za-z]{4}$/.test(type)) throw new Error("PNG inválido: tipo de chunk inválido.");
     const reservedCode = type.charCodeAt(2);
@@ -293,11 +302,8 @@ function parsePng(bytes: Uint8Array): ParsedPng {
       if (seenIhdr || chunks.length !== 0 || length !== 13) {
         throw new Error("IHDR PNG inválido o duplicado.");
       }
-      const width = readUint32BE(data, 0, "PNG IHDR");
-      const height = readUint32BE(data, 4, "PNG IHDR");
-      if (width > 0x7fffffff || height > 0x7fffffff) {
-        throw new Error("PNG fuera del rango de 31 bits: dimensiones IHDR.");
-      }
+      const width = readUint31(data, 0, "ancho IHDR");
+      const height = readUint31(data, 4, "alto IHDR");
       const depth = readUint8(data, 8, "PNG IHDR");
       const colorType = readUint8(data, 9, "PNG IHDR");
       const compression = readUint8(data, 10, "PNG IHDR");
@@ -347,10 +353,15 @@ function parsePng(bytes: Uint8Array): ParsedPng {
       throw new Error(`Orden PNG inválido para ${type}.`);
     }
     if (type === "hIST" && (!seenPlte || seenIdat)) throw new Error("Orden PNG inválido para hIST.");
-    if (type === "gAMA" && (length !== 4 || readUint32BE(data, 0, "PNG gAMA") === 0)) {
+    if (type === "gAMA" && (length !== 4 || readUint31(data, 0, "valor gAMA") === 0)) {
       throw new Error("gAMA PNG inválido.");
     }
-    if (type === "cHRM" && length !== 32) throw new Error("cHRM PNG inválido.");
+    if (type === "cHRM") {
+      if (length !== 32) throw new Error("cHRM PNG inválido.");
+      for (let field = 0; field < 8; field += 1) {
+        readUint31(data, field * 4, `valor cHRM ${field + 1}`);
+      }
+    }
     if (type === "tRNS") {
       const colorType = dimensions?.colorType;
       if (colorType === 3 && (!seenPlte || length > paletteEntries)) {
@@ -373,31 +384,34 @@ function parsePng(bytes: Uint8Array): ParsedPng {
     }
     if (type === "pHYs") {
       if (length !== 9) throw new Error("pHYs PNG inválido.");
-      const x = readUint32BE(data, 0, "PNG pHYs");
+      const x = readUint31(data, 0, "densidad X pHYs");
+      readUint31(data, 4, "densidad Y pHYs");
       const unit = readUint8(data, 8, "PNG pHYs");
       if (unit > 1) throw new Error("pHYs PNG inválido.");
       density = unit === 1 ? x : null;
     }
 
     if (type === "acTL") {
-      if (seenActl || seenIdat || length !== 8 || readUint32BE(data, 0, "PNG acTL") === 0) {
+      const frameCount = length === 8 ? readUint31(data, 0, "cantidad de frames acTL") : 0;
+      if (seenActl || seenIdat || length !== 8 || frameCount === 0) {
         throw new Error("APNG acTL inválido.");
       }
+      readUint31(data, 4, "cantidad de reproducciones acTL");
       seenActl = true;
-      expectedApngFrames = readUint32BE(data, 0, "PNG acTL");
+      expectedApngFrames = frameCount;
     } else if (type === "fcTL") {
       if (!seenActl || length !== 26) throw new Error("APNG fcTL inválido.");
       if (pendingFrameData) throw new Error("APNG inválido: frame sin datos.");
-      const sequence = readUint32BE(data, 0, "PNG fcTL");
+      const sequence = readUint31(data, 0, "secuencia fcTL");
       if (sequence !== expectedApngSequence) throw new Error("Secuencia APNG inválida.");
       expectedApngSequence += 1;
       frameControlCount += 1;
       pendingFrameData = true;
       activeFrameDataKind = seenIdat ? "fdat" : "idat";
-      const width = readUint32BE(data, 4, "PNG fcTL");
-      const height = readUint32BE(data, 8, "PNG fcTL");
-      const x = readUint32BE(data, 12, "PNG fcTL");
-      const y = readUint32BE(data, 16, "PNG fcTL");
+      const width = readUint31(data, 4, "ancho fcTL");
+      const height = readUint31(data, 8, "alto fcTL");
+      const x = readUint31(data, 12, "desplazamiento X fcTL");
+      const y = readUint31(data, 16, "desplazamiento Y fcTL");
       if (
         width === 0 ||
         height === 0 ||
@@ -416,7 +430,7 @@ function parsePng(bytes: Uint8Array): ParsedPng {
       if (!seenActl || !seenIdat || length < 4 || activeFrameDataKind !== "fdat") {
         throw new Error("APNG fdAT inválido: falta un fcTL activo.");
       }
-      const sequence = readUint32BE(data, 0, "PNG fdAT");
+      const sequence = readUint31(data, 0, "secuencia fdAT");
       if (sequence !== expectedApngSequence) throw new Error("Secuencia APNG inválida.");
       expectedApngSequence += 1;
       pendingFrameData = false;

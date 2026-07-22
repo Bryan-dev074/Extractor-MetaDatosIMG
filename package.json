@@ -12,6 +12,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@xmldom/xmldom": "0.9.10",
     "framer-motion": "^11.18.2",
     "jszip": "^3.10.1",
     "next": "^15.1.6",
