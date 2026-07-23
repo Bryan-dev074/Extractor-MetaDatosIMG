@@ -1,432 +1,342 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import InteractiveBackground from "@/components/InteractiveBackground";
-import Dropzone from "@/components/Dropzone";
-import ResultCard, { type BatchItem } from "@/components/ResultCard";
-import TikTokInfo from "@/components/TikTokInfo";
-import { cleanImage, cleanFileName } from "@/lib/cleaner";
+import React, { useEffect, useMemo, useState } from "react";
+import { useReducedMotion } from "framer-motion";
+import BatchToolbar from "../components/BatchToolbar";
+import InteractiveBackground from "../components/InteractiveBackground";
+import ResultCard, {
+  type TikTokItemState,
+} from "../components/ResultCard";
+import SourcePicker from "../components/SourcePicker";
+import TikTokInfo from "../components/TikTokInfo";
+import { useImageWorkspace } from "../hooks/useImageWorkspace";
 
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-const ACCEPTED = ["image/jpeg", "image/png"];
-const isImage = (f: File) =>
-  ACCEPTED.includes(f.type) || /\.(jpe?g|png)$/i.test(f.name);
+const INITIAL_ROWS = 60;
+const IDLE_TIKTOK: TikTokItemState = { status: "idle" };
 
 export default function Home() {
-  const [items, setItems] = useState<BatchItem[]>([]);
-  const [zipping, setZipping] = useState(false);
-  const idRef = useRef(0);
-  const addInputRef = useRef<HTMLInputElement>(null);
+  const workspace = useImageWorkspace();
+  const reduceMotion = useReducedMotion();
+  const [visibleRows, setVisibleRows] = useState(INITIAL_ROWS);
+  const hasMaterial =
+    workspace.batch.items.length > 0 || workspace.skipped.length > 0;
+  const shownItems = workspace.batch.items.slice(0, visibleRows);
 
-  const processItem = useCallback(async (it: BatchItem, i: number) => {
-    // Escalona el arranque para que los escáneres no aparezcan todos a la vez.
-    await delay(i * 130);
-    try {
-      const res = await cleanImage(it.file);
-      setItems((prev) =>
-        prev.map((x) =>
-          x.id === it.id
-            ? {
-                ...x,
-                result: res,
-                readout: res.findings.length
-                  ? res.findings.map((f) => f.label)
-                  : ["Sin etiquetas de IA"],
-              }
-            : x,
-        ),
-      );
-      await delay(Math.min(2600, 1000 + res.findings.length * 300));
-      setItems((prev) =>
-        prev.map((x) => (x.id === it.id ? { ...x, status: "done" } : x)),
-      );
-    } catch (e) {
-      setItems((prev) =>
-        prev.map((x) =>
-          x.id === it.id
-            ? {
-                ...x,
-                status: "error",
-                error: e instanceof Error ? e.message : "Error al procesar.",
-              }
-            : x,
-        ),
-      );
-    }
-  }, []);
+  useEffect(() => {
+    if (!hasMaterial) setVisibleRows(INITIAL_ROWS);
+  }, [hasMaterial]);
 
-  const addFiles = useCallback(
-    (files: File[]) => {
-      const valid = files.filter(isImage);
-      if (!valid.length) return;
-      const created: BatchItem[] = valid.map((f) => ({
-        id: `it${++idRef.current}`,
-        file: f,
-        name: f.name,
-        previewUrl: URL.createObjectURL(f),
-        status: "processing",
-        readout: [],
-      }));
-      setItems((prev) => [...prev, ...created]);
-      created.forEach((it, i) => processItem(it, i));
-    },
-    [processItem],
+  const liveCount =
+    workspace.batch.summary.queued + workspace.batch.summary.processing;
+  const resultSummary = useMemo(
+    () =>
+      `${workspace.batch.summary.completed} listas, ${workspace.batch.summary.failed} con error, ${workspace.skipped.length} omitidas`,
+    [
+      workspace.batch.summary.completed,
+      workspace.batch.summary.failed,
+      workspace.skipped.length,
+    ],
   );
 
-  const downloadOne = useCallback((item: BatchItem) => {
-    if (!item.result) return;
-    const blob = new Blob([item.result.cleaned as BlobPart], {
-      type: item.result.mime,
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = cleanFileName(item.name);
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1500);
-  }, []);
-
-  const removeItem = useCallback((id: string) => {
-    setItems((prev) => {
-      const it = prev.find((x) => x.id === id);
-      if (it) URL.revokeObjectURL(it.previewUrl);
-      return prev.filter((x) => x.id !== id);
-    });
-  }, []);
-
-  const reset = useCallback(() => {
-    setItems((prev) => {
-      prev.forEach((x) => URL.revokeObjectURL(x.previewUrl));
-      return [];
-    });
-  }, []);
-
-  const downloadAll = useCallback(async () => {
-    const done = items.filter((x) => x.status === "done" && x.result);
-    if (!done.length) return;
-    setZipping(true);
-    try {
-      const JSZip = (await import("jszip")).default;
-      const zip = new JSZip();
-      const used = new Set<string>();
-      done.forEach((x, idx) => {
-        let name = cleanFileName(x.name);
-        if (used.has(name)) name = `${idx + 1}-${name}`;
-        used.add(name);
-        zip.file(name, x.result!.cleaned);
-      });
-      const blob = await zip.generateAsync({ type: "blob", compression: "STORE" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "imagenes-limpias.zip";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1500);
-    } finally {
-      setZipping(false);
-    }
-  }, [items]);
-
-  const stats = useMemo(() => {
-    const done = items.filter((x) => x.status === "done");
-    return {
-      total: items.length,
-      doneCount: done.length,
-      findings: done.reduce((s, x) => s + (x.result?.findings.length ?? 0), 0),
-      processing: items.some((x) => x.status === "processing"),
-    };
-  }, [items]);
-
-  const working = items.length > 0;
-
   return (
-    <main className="relative min-h-screen overflow-hidden">
+    <>
+      <a className="skip-link" href="#contenido">
+        Saltar al contenido
+      </a>
       <InteractiveBackground />
-
-      {/* Auroras de gradiente (capa CSS) */}
-      <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
-        <div className="absolute -left-32 -top-40 h-[36rem] w-[36rem] animate-aurora rounded-full bg-accent-violet/20 blur-[120px]" />
-        <div className="absolute -right-40 top-20 h-[34rem] w-[34rem] animate-aurora-slow rounded-full bg-accent-cyan/15 blur-[120px]" />
-        <div className="absolute bottom-[-12rem] left-1/3 h-[32rem] w-[32rem] animate-aurora rounded-full bg-accent-fuchsia/15 blur-[120px]" />
+      <div className="visual-backdrop" aria-hidden="true">
+        <span className="aurora aurora--violet" />
+        <span className="aurora aurora--cyan" />
+        <span className="aurora aurora--fuchsia" />
+        <span className="grid-overlay" />
       </div>
-
-      {/* Rejilla tenue */}
       <div
-        className="pointer-events-none fixed inset-0 z-0 opacity-[0.04]"
-        style={{
-          backgroundImage:
-            "linear-gradient(rgba(255,255,255,0.5) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.5) 1px, transparent 1px)",
-          backgroundSize: "64px 64px",
-          maskImage: "radial-gradient(circle at 50% 30%, black, transparent 75%)",
-        }}
-      />
-
-      <div className="relative z-10 mx-auto flex min-h-screen max-w-6xl flex-col px-5 py-8 sm:px-8">
-        <Header />
-
-        {/* Hero */}
-        <section className="mx-auto mt-10 max-w-3xl text-center sm:mt-16">
-          <motion.div
-            initial={{ opacity: 0, y: 18 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
-          >
-            <div className="mx-auto mb-5 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-1.5 text-xs font-medium text-white/60 backdrop-blur-md">
-              <span className="relative flex h-2 w-2">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent-emerald opacity-75" />
-                <span className="relative inline-flex h-2 w-2 rounded-full bg-accent-emerald" />
-              </span>
-              Procesamiento 100% local · tus imágenes nunca salen del navegador
-            </div>
-            <h1 className="font-display text-4xl font-bold leading-[1.05] tracking-tight text-white sm:text-6xl">
-              Quita la etiqueta de{" "}
-              <span className="text-gradient">IA</span> sin perder
-              <br className="hidden sm:block" /> ni un píxel de calidad
-            </h1>
-            <p className="mx-auto mt-5 max-w-2xl text-base text-white/55 sm:text-lg">
-              Elimina de forma quirúrgica los rastros de IA —manifiestos{" "}
-              <span className="text-white/80">C2PA</span>, metadatos{" "}
-              <span className="text-white/80">XMP / EXIF</span> de Midjourney,
-              DALL·E, Firefly, Nano Banana…— conservando intactos el{" "}
-              <span className="text-white/80">perfil de color ICC</span>, la{" "}
-              <span className="text-white/80">resolución</span> y los píxeles. Para que
-              en redes se vea perfecta.
-            </p>
-          </motion.div>
-        </section>
-
-        {/* Zona de trabajo */}
-        <section className="mx-auto mt-10 w-full max-w-5xl flex-1 pb-12 sm:mt-14">
-          <AnimatePresence mode="wait">
-            {!working ? (
-              <motion.div
-                key="drop"
-                initial={{ opacity: 0, scale: 0.98 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.98 }}
-                transition={{ duration: 0.4 }}
-                className="mx-auto max-w-2xl"
-              >
-                <Dropzone onFiles={addFiles} />
-                <div className="mt-6">
-                  <TikTokInfo />
-                </div>
-                <FeatureRow />
-              </motion.div>
-            ) : (
-              <motion.div
-                key="work"
-                initial={{ opacity: 0, y: 16 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.5 }}
-                className="space-y-6"
-              >
-                {/* Barra de acciones */}
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="text-sm text-white/60">
-                    <span className="font-display text-lg font-bold text-white">
-                      {stats.total}
-                    </span>{" "}
-                    imagen{stats.total !== 1 ? "es" : ""} ·{" "}
-                    <span className="text-accent-emerald">{stats.findings}</span>{" "}
-                    etiqueta{stats.findings !== 1 ? "s" : ""} de IA eliminada
-                    {stats.findings !== 1 ? "s" : ""}
-                    {stats.processing && (
-                      <span className="ml-2 text-accent-cyan">· procesando…</span>
-                    )}
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      data-no-ripple
-                      onClick={() => addInputRef.current?.click()}
-                      className="rounded-xl border border-white/[0.12] bg-white/5 px-4 py-2 text-sm font-medium text-white/70 transition-colors hover:border-white/25 hover:text-white"
-                    >
-                      + Añadir
-                    </button>
-                    {stats.doneCount > 1 && (
-                      <button
-                        data-no-ripple
-                        onClick={downloadAll}
-                        disabled={zipping}
-                        className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-accent-violet to-accent-cyan px-4 py-2 text-sm font-semibold text-white shadow-glow transition-transform hover:scale-[1.02] active:scale-95 disabled:opacity-60"
-                      >
-                        {zipping ? "Comprimiendo…" : "Descargar todo (.zip)"}
-                      </button>
-                    )}
-                    <button
-                      data-no-ripple
-                      onClick={reset}
-                      className="rounded-xl border border-white/[0.12] bg-white/[0.02] px-4 py-2 text-sm font-medium text-white/60 transition-colors hover:border-white/25 hover:text-white"
-                    >
-                      Limpiar todo
-                    </button>
-                  </div>
-                </div>
-
-                <TikTokInfo />
-
-                {/* Grid de resultados */}
-                <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-                  <AnimatePresence>
-                    {items.map((it, i) => (
-                      <ResultCard
-                        key={it.id}
-                        item={it}
-                        index={i}
-                        onDownload={downloadOne}
-                        onRemove={removeItem}
-                      />
-                    ))}
-                  </AnimatePresence>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          {/* Input oculto para "Añadir" más imágenes */}
-          <input
-            ref={addInputRef}
-            type="file"
-            accept="image/jpeg,image/png"
-            multiple
-            className="hidden"
-            onChange={(e) => {
-              addFiles(Array.from(e.target.files ?? []));
-              e.target.value = "";
-            }}
-          />
-        </section>
-
-        <Footer />
-      </div>
-    </main>
-  );
-}
-
-/* ── Cabecera ────────────────────────────────────────────────────────────── */
-function Header() {
-  return (
-    <header className="flex items-center justify-between">
-      <div className="flex items-center gap-3">
-        <div className="relative flex h-11 w-11 items-center justify-center">
-          {/* Halo rosa que late, a juego con la Kitty */}
-          <motion.span
-            aria-hidden
-            animate={{ opacity: [0.4, 0.85, 0.4], scale: [1, 1.15, 1] }}
-            transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
-            className="absolute -inset-1 rounded-2xl bg-accent-fuchsia/45 blur-lg"
-          />
-          {/* Logo: gif animado en loop infinito, sin fondo, con flotación sutil */}
-          <motion.div
-            animate={{ y: [0, -2.5, 0] }}
-            transition={{ duration: 3.2, repeat: Infinity, ease: "easeInOut" }}
-            className="relative flex h-12 w-12 items-center justify-center"
-          >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src="/logo.gif"
-              alt="Extractor MetaData logo"
-              className="h-full w-full object-contain drop-shadow-[0_2px_10px_rgba(232,121,249,0.35)]"
-            />
-          </motion.div>
-        </div>
-        <div className="font-display text-lg font-bold leading-tight tracking-tight text-white">
-          Extractor MetaData
-        </div>
-      </div>
-      <a
-        href="https://github.com/Bryan-dev074"
-        target="_blank"
-        rel="noopener noreferrer"
-        className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-white/70 transition-colors hover:border-white/20 hover:text-white"
+        className="app-shell"
+        data-reduced-motion={reduceMotion ? "true" : "false"}
       >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-          <path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49v-1.7c-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.62.07-.62 1 .07 1.53 1.05 1.53 1.05.89 1.57 2.34 1.12 2.91.85.09-.66.35-1.12.63-1.38-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.27 2.75 1.05A9.3 9.3 0 0 1 12 6.84c.85 0 1.71.12 2.51.34 1.91-1.32 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.94-2.34 4.81-4.57 5.06.36.32.68.94.68 1.9v2.81c0 .27.18.6.69.49A10.02 10.02 0 0 0 22 12.25C22 6.58 17.52 2 12 2Z" />
-        </svg>
-        <span className="text-white/55">
-          <span className="hidden sm:inline">Creado por </span>
-          <span
-            className="animate-shimmer bg-clip-text font-semibold text-transparent"
-            style={{
-              backgroundImage:
-                "linear-gradient(90deg,#8B5CF6,#22D3EE,#E879F9,#8B5CF6)",
-              backgroundSize: "200% auto",
-            }}
+        <header className="product-header">
+          <a className="product-mark" href="#" aria-label="Extractor MetaData, inicio">
+            <span className="product-mark__glyph" aria-hidden="true">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/logo.gif" alt="" />
+            </span>
+            <span>
+              <strong>Extractor MetaData</strong>
+              <small>Calidad intacta · privacidad total</small>
+            </span>
+          </a>
+          <div className="header-actions">
+            <span className="header-proof">
+              <span className="header-proof__signal" aria-hidden="true" />
+              100% local
+            </span>
+            <a
+              className="creator-link"
+              href="https://github.com/Bryan-dev074"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <GithubGlyph />
+              <span className="creator-link__prefix">Creado por</span>{" "}
+              <strong>Bryan-dev074</strong>
+            </a>
+          </div>
+        </header>
+
+        <main id="contenido" className="workbench">
+          <section className="workbench-intro" aria-labelledby="page-title">
+            <p className="local-pill">
+              <span aria-hidden="true" />
+              Procesamiento 100% local · tus imágenes nunca salen del navegador
+            </p>
+            <h1 id="page-title">
+              Quita la etiqueta de <span>IA</span> sin perder
+              <br className="desktop-break" /> ni un píxel de calidad
+            </h1>
+            <p className="hero-copy">
+              Limpia imágenes sueltas o una carpeta completa con todas sus
+              subcarpetas. Eliminamos rastros de IA de forma quirúrgica, conservando
+              intactos el perfil de color, la resolución y los píxeles. Para TikTok,
+              Photo Max prepara además un PNG sRGB adaptativo sin cambiar el tamaño.
+            </p>
+          </section>
+
+          {!hasMaterial ? (
+            <div className="empty-workbench">
+              <SourcePicker
+                onInput={workspace.ingest}
+                disabled={!workspace.batch.ready}
+              />
+              <OutputLegend />
+              <TikTokInfo />
+              <FeatureRow />
+            </div>
+          ) : (
+            <div className="active-workbench">
+              <BatchToolbar
+                summary={workspace.batch.summary}
+                skipped={workspace.skipped.length}
+                cleanReadyCount={workspace.cleanReadyCount}
+                tiktokReadyCount={workspace.tiktokReadyCount}
+                archive={workspace.archive}
+                actions={{
+                  cancelBatch: workspace.cancelBatch,
+                  reset: workspace.reset,
+                  prepareTikTok: workspace.prepareAllTikTok,
+                  downloadCleanArchive: workspace.downloadCleanArchive,
+                  downloadTikTokArchive: workspace.downloadTikTokArchive,
+                  cancelArchive: workspace.cancelArchive,
+                }}
+              />
+
+              <aside className="add-source-panel">
+                <SourcePicker
+                  compact
+                  onInput={workspace.ingest}
+                  disabled={!workspace.batch.ready}
+                />
+              </aside>
+
+              {workspace.skipped.length > 0 ? (
+                <section className="skipped-panel" aria-labelledby="skipped-title">
+                  <div>
+                    <p className="eyebrow">Fuera del lote</p>
+                    <h2 id="skipped-title">
+                      {workspace.skipped.length} archivo
+                      {workspace.skipped.length === 1 ? "" : "s"} omitido
+                      {workspace.skipped.length === 1 ? "" : "s"}
+                    </h2>
+                  </div>
+                  <ul>
+                    {workspace.skipped.map((item, index) => (
+                      <li key={`${item.relativePath}-${index}`}>
+                        <code>{item.relativePath}</code>
+                        <span>{item.reason}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              ) : null}
+
+              <section
+                className="results-panel"
+                aria-labelledby="results-title"
+                aria-busy={liveCount > 0}
+              >
+                <div className="results-panel__heading">
+                  <div>
+                    <p className="eyebrow">Prueba por archivo</p>
+                    <h2 id="results-title">Rutas y resultados</h2>
+                  </div>
+                  <p className="results-summary" aria-live="polite">
+                    {resultSummary}
+                  </p>
+                </div>
+
+                <div className="result-list">
+                  {shownItems.map((item) => {
+                    const tiktok =
+                      (workspace.tiktokById[item.id] as TikTokItemState | undefined) ??
+                      IDLE_TIKTOK;
+                    return (
+                      <ResultCard
+                        key={item.id}
+                        item={item}
+                        previewUrl={workspace.previewUrls[item.id] ?? null}
+                        tiktok={tiktok}
+                        onPreviewVisibility={workspace.setPreviewVisible}
+                        onDownloadClean={workspace.downloadClean}
+                        onGenerateTikTok={workspace.generateTikTok}
+                        onDownloadTikTok={workspace.downloadTikTok}
+                        onDownloadTikTokPreview={workspace.downloadTikTokPreview}
+                        onCancelTikTok={workspace.cancelTikTok}
+                        onRetry={workspace.retry}
+                        onRemove={workspace.remove}
+                      />
+                    );
+                  })}
+                </div>
+
+                {visibleRows < workspace.batch.items.length ? (
+                  <button
+                    type="button"
+                    className="control control--secondary load-more"
+                    onClick={() => setVisibleRows((count) => count + INITIAL_ROWS)}
+                  >
+                    Mostrar 60 resultados más
+                  </button>
+                ) : null}
+              </section>
+
+              <TikTokInfo />
+            </div>
+          )}
+        </main>
+
+        <footer className="product-footer">
+          <p>
+            JPEG y PNG · limpieza estructural local · las marcas incrustadas en
+            píxeles no son metadatos.
+          </p>
+          <a
+            href="https://github.com/Bryan-dev074"
+            target="_blank"
+            rel="noopener noreferrer"
           >
             Bryan-dev074
-          </span>
-        </span>
-      </a>
-    </header>
+          </a>
+        </footer>
+      </div>
+    </>
   );
 }
 
-/* ── Fila de características (estado idle) ────────────────────────────────── */
+function OutputLegend() {
+  return (
+    <section className="output-legend" aria-label="Dos tipos de salida">
+      <article>
+        <span className="legend-icon legend-icon--clean" aria-hidden="true">
+          <ShieldGlyph />
+        </span>
+        <span className="lane-label">Limpia</span>
+        <strong>Píxeles 1:1</strong>
+        <small>Sin recomprimir · metadatos fuera, calidad intacta</small>
+      </article>
+      <article>
+        <span className="legend-icon legend-icon--tiktok" aria-hidden="true">
+          <TikTokGlyph />
+        </span>
+        <span className="lane-label">TikTok</span>
+        <strong>PNG sRGB</strong>
+        <small>Anti-parches adaptativo · tamaño nativo</small>
+      </article>
+    </section>
+  );
+}
+
 function FeatureRow() {
-  const feats = [
+  const features = [
     {
+      icon: <ByteGlyph />,
       title: "Cirugía a nivel de bytes",
-      desc: "Sin decodificar ni recomprimir: los píxeles quedan idénticos.",
-      icon: (
-        <path d="M14.5 3.5 21 10 10.5 20.5 4 14zM3 21l3-1M13 6l5 5" />
-      ),
+      description: "Sin decodificar ni recomprimir: los píxeles quedan idénticos.",
     },
     {
-      title: "Calidad para redes",
-      desc: "Conserva ICC, resolución y orientación → sin colores lavados.",
-      icon: <path d="M12 2v20M2 12h20M5 5l14 14M19 5 5 19" />,
+      icon: <FolderGlyph />,
+      title: "Carpetas completas",
+      description: "Conserva nombres, rutas y subcarpetas dentro del ZIP final.",
     },
     {
+      icon: <LockGlyph />,
       title: "Privado por diseño",
-      desc: "Todo ocurre en tu dispositivo. Nada se sube a ningún servidor.",
-      icon: (
-        <>
-          <rect x="3" y="11" width="18" height="11" rx="2" />
-          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-        </>
-      ),
+      description: "Todo ocurre en tu dispositivo. Nada se sube a un servidor.",
     },
   ];
+
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: 0.3, duration: 0.6 }}
-      className="mt-10 grid gap-4 sm:grid-cols-3"
-    >
-      {feats.map((f) => (
-        <div
-          key={f.title}
-          className="glass-soft group p-5 transition-colors hover:border-white/20"
-        >
-          <span className="mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-accent-violet/20 to-accent-cyan/15 text-accent-cyan">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              {f.icon}
-            </svg>
-          </span>
-          <h4 className="font-display text-sm font-semibold text-white">{f.title}</h4>
-          <p className="mt-1 text-xs leading-relaxed text-white/50">{f.desc}</p>
-        </div>
+    <section className="feature-row" aria-label="Ventajas">
+      {features.map((feature) => (
+        <article key={feature.title}>
+          <span aria-hidden="true">{feature.icon}</span>
+          <h2>{feature.title}</h2>
+          <p>{feature.description}</p>
+        </article>
       ))}
-    </motion.div>
+    </section>
   );
 }
 
-/* ── Pie ─────────────────────────────────────────────────────────────────── */
-function Footer() {
+function GithubGlyph() {
   return (
-    <footer className="mt-auto border-t border-white/5 pt-6 text-center text-xs text-white/35">
-      <p>
-        Extractor MetaData limpia metadatos de IA preservando la calidad. No elimina marcas de agua
-        invisibles a nivel de píxel (p. ej. SynthID). Procesamiento 100% en el navegador.
-      </p>
-    </footer>
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49v-1.7c-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.62.07-.62 1 .07 1.53 1.05 1.53 1.05.89 1.57 2.34 1.12 2.91.85.09-.66.35-1.12.63-1.38-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.27 2.75 1.05A9.3 9.3 0 0 1 12 6.84c.85 0 1.71.12 2.51.34 1.91-1.32 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.94-2.34 4.81-4.57 5.06.36.32.68.94.68 1.9v2.81c0 .27.18.6.69.49A10.02 10.02 0 0 0 22 12.25C22 6.58 17.52 2 12 2Z" />
+    </svg>
+  );
+}
+
+function ShieldGlyph() {
+  return (
+    <svg viewBox="0 0 24 24">
+      <path d="M12 3 4.5 6v5.5c0 4.6 2.9 7.7 7.5 9.5 4.6-1.8 7.5-4.9 7.5-9.5V6L12 3Z" />
+      <path d="m8.5 12 2.2 2.2 4.8-5" />
+    </svg>
+  );
+}
+
+function TikTokGlyph() {
+  return (
+    <svg viewBox="0 0 24 24">
+      <path
+        fill="currentColor"
+        stroke="none"
+        d="M16.5 3c.3 2.1 1.6 3.6 3.5 3.9v2.6c-1.3.1-2.5-.3-3.5-1v5.9c0 3.6-2.6 6.1-5.9 6.1-3 0-5.3-2.3-5.3-5.2 0-3 2.4-5.2 5.4-5.2.3 0 .6 0 .9.1v2.7c-.3-.1-.6-.1-.9-.1-1.4 0-2.5 1-2.5 2.4s1.1 2.5 2.5 2.5c1.5 0 2.6-1.1 2.6-2.9V3h2.7Z"
+      />
+    </svg>
+  );
+}
+
+function ByteGlyph() {
+  return (
+    <svg viewBox="0 0 24 24">
+      <path d="M14.5 3.5 21 10 10.5 20.5 4 14zM3 21l3-1M13 6l5 5" />
+    </svg>
+  );
+}
+
+function FolderGlyph() {
+  return (
+    <svg viewBox="0 0 24 24">
+      <path d="M3 7.5h6l2-2h10v13H3z" />
+      <path d="M3 9.5h18" />
+    </svg>
+  );
+}
+
+function LockGlyph() {
+  return (
+    <svg viewBox="0 0 24 24">
+      <rect x="4" y="10" width="16" height="11" rx="2" />
+      <path d="M8 10V7a4 4 0 0 1 8 0v3" />
+    </svg>
   );
 }
