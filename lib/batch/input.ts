@@ -1,5 +1,6 @@
 import { detectImageFormat, type SupportedFormat } from "../metadata/format";
 import { MAX_INPUT_BYTES } from "../metadata/limits";
+import { assertRetainedByteBudget } from "../archive/zip";
 import { sanitizeArchiveSegment } from "./archive-path";
 import type { InputImage, InputSelection, InputSource, SkippedInput } from "./types";
 
@@ -171,6 +172,11 @@ async function normalizeCandidates(
   initialSkipped: SkippedInput[] = [],
   folderRoots: string[] = [],
 ): Promise<InputSelection> {
+  assertRetainedByteBudget(
+    candidates
+      .map((candidate) => candidate.file.size)
+      .filter((size) => Number.isSafeInteger(size) && size >= 0),
+  );
   const normalizedCandidates = candidates
     .map((candidate) => ({ ...candidate, relativePath: normalizedPath(candidate.relativePath) }))
     .sort((left, right) => {
