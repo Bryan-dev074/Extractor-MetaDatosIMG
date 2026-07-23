@@ -1,11 +1,27 @@
 import type { CleanResult } from "../types";
+import {
+  createHtmlTikTokAdapter,
+  exportForTikTok,
+  type TikTokExportResult,
+} from "../tiktok/export";
 
-export type WorkerRequest = {
+export type CleanWorkerRequest = {
   id: string;
   generation: number;
   kind: "clean";
   bytes: ArrayBuffer;
 };
+
+export type TikTokWorkerRequest = {
+  id: string;
+  generation: number;
+  kind: "tiktok";
+  bytes: ArrayBuffer;
+  mimeType: string;
+};
+
+export type ImageWorkerRequest = CleanWorkerRequest | TikTokWorkerRequest;
+export type WorkerRequest = ImageWorkerRequest;
 
 export type WorkerResponse =
   | {
@@ -21,12 +37,27 @@ export type WorkerResponse =
       ok: false;
       kind: "clean";
       error: string;
+    }
+  | {
+      id: string;
+      generation: number;
+      ok: true;
+      kind: "tiktok";
+      result: TikTokExportResult;
+    }
+  | {
+      id: string;
+      generation: number;
+      ok: false;
+      kind: "tiktok";
+      error: string;
+      fallbackRequired?: boolean;
     };
 
 export type ImageWorkerEventType = "message" | "error" | "messageerror";
 
 export interface ImageWorker {
-  postMessage(message: WorkerRequest, transfer: Transferable[]): void;
+  postMessage(message: ImageWorkerRequest, transfer: Transferable[]): void;
   terminate(): void;
   addEventListener(
     type: ImageWorkerEventType,
@@ -49,10 +80,14 @@ export interface ImageWorkerPool {
   readonly size: number;
   readonly running: number;
   readonly destroyed: boolean;
-  clean(request: WorkerRequest, signal?: AbortSignal): Promise<CleanResult>;
-  process(request: WorkerRequest, signal?: AbortSignal): Promise<CleanResult>;
+  clean(request: CleanWorkerRequest, signal?: AbortSignal): Promise<CleanResult>;
+  tiktok(request: TikTokWorkerRequest, signal?: AbortSignal): Promise<TikTokExportResult>;
+  process(request: CleanWorkerRequest, signal?: AbortSignal): Promise<CleanResult>;
+  process(request: TikTokWorkerRequest, signal?: AbortSignal): Promise<TikTokExportResult>;
   destroy(): void;
 }
+
+type ImageWorkerResult = CleanResult | TikTokExportResult;
 
 interface ActiveRequest {
   finished: boolean;
@@ -61,10 +96,10 @@ interface ActiveRequest {
 }
 
 interface WaitingRequest {
-  request: WorkerRequest;
+  request: ImageWorkerRequest;
   signal?: AbortSignal;
   settled: boolean;
-  resolve: (result: CleanResult) => void;
+  resolve: (result: ImageWorkerResult) => void;
   reject: (error: unknown) => void;
   onAbort: () => void;
 }
@@ -96,15 +131,24 @@ function eventError(event: Event): Error {
 
 function isWorkerResponse(value: unknown): value is WorkerResponse {
   if (typeof value !== "object" || value === null) return false;
-  const candidate = value as Partial<WorkerResponse>;
+  const candidate = value as Record<string, unknown>;
   const envelopeIsValid =
     typeof candidate.id === "string" &&
     typeof candidate.generation === "number" &&
-    candidate.kind === "clean" &&
+    (candidate.kind === "clean" || candidate.kind === "tiktok") &&
     typeof candidate.ok === "boolean";
   if (!envelopeIsValid) return false;
   if (candidate.ok) return typeof candidate.result === "object" && candidate.result !== null;
-  return "error" in candidate && typeof candidate.error === "string";
+  return typeof candidate.error === "string";
+}
+
+export class TikTokWorkerFallbackError extends Error {
+  readonly fallbackRequired = true;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "TikTokWorkerFallbackError";
+  }
 }
 
 export function createDefaultImageWorker(): ImageWorker {
@@ -139,7 +183,7 @@ export function createImageWorkerPool(
 
   const settleWaiting = (
     entry: WaitingRequest,
-    outcome: { result: CleanResult } | { error: unknown },
+    outcome: { result: ImageWorkerResult } | { error: unknown },
   ): void => {
     if (entry.settled) return;
     entry.settled = true;
@@ -229,7 +273,7 @@ export function createImageWorkerPool(
     };
 
     const finish = (
-      outcome: { result: CleanResult } | { error: unknown },
+      outcome: { result: ImageWorkerResult } | { error: unknown },
       replaceWorker: boolean,
     ): void => {
       if (active.finished) return;
@@ -253,8 +297,15 @@ export function createImageWorkerPool(
       ) {
         return;
       }
-      if (message.ok) finish({ result: message.result }, false);
-      else finish({ error: new Error(message.error) }, false);
+      if (message.ok) {
+        finish({ result: message.result }, false);
+      } else {
+        const error =
+          message.kind === "tiktok" && message.fallbackRequired
+            ? new TikTokWorkerFallbackError(message.error)
+            : new Error(message.error);
+        finish({ error }, false);
+      }
     };
 
     const onAbort = (): void => {
@@ -328,11 +379,14 @@ export function createImageWorkerPool(
     if (slot.worker) attachWorker(slot, slot.worker);
   }
 
-  const execute = (request: WorkerRequest, signal?: AbortSignal): Promise<CleanResult> => {
+  const execute = <Result extends ImageWorkerResult>(
+    request: ImageWorkerRequest,
+    signal?: AbortSignal,
+  ): Promise<Result> => {
     if (terminal) return Promise.reject(new Error("El pool de workers fue destruido."));
     if (signal?.aborted) return Promise.reject(abortError(signal.reason));
 
-    return new Promise<CleanResult>((resolve, reject) => {
+    return new Promise<ImageWorkerResult>((resolve, reject) => {
       const entry: WaitingRequest = {
         request,
         signal,
@@ -349,8 +403,29 @@ export function createImageWorkerPool(
       waiting.push(entry);
       signal?.addEventListener("abort", entry.onAbort, { once: true });
       drainWaiting();
-    });
+    }) as Promise<Result>;
   };
+
+  const clean = (request: CleanWorkerRequest, signal?: AbortSignal): Promise<CleanResult> =>
+    execute<CleanResult>(request, signal);
+  const tiktok = (
+    request: TikTokWorkerRequest,
+    signal?: AbortSignal,
+  ): Promise<TikTokExportResult> => execute<TikTokExportResult>(request, signal);
+  function process(
+    request: CleanWorkerRequest,
+    signal?: AbortSignal,
+  ): Promise<CleanResult>;
+  function process(
+    request: TikTokWorkerRequest,
+    signal?: AbortSignal,
+  ): Promise<TikTokExportResult>;
+  function process(
+    request: ImageWorkerRequest,
+    signal?: AbortSignal,
+  ): Promise<ImageWorkerResult> {
+    return execute(request, signal);
+  }
 
   return {
     size,
@@ -360,8 +435,9 @@ export function createImageWorkerPool(
     get destroyed() {
       return terminal;
     },
-    clean: execute,
-    process: execute,
+    clean,
+    tiktok,
+    process,
     destroy() {
       if (terminal) return;
       terminal = true;
@@ -377,6 +453,113 @@ export function createImageWorkerPool(
         slot.active = null;
         slot.runtimeListeners = null;
       }
+    },
+  };
+}
+
+export type TikTokWorkerPoolOptions = Omit<ImageWorkerPoolOptions, "size">;
+
+export function createTikTokWorkerPool(
+  options: TikTokWorkerPoolOptions = {},
+): ImageWorkerPool {
+  return createImageWorkerPool({ ...options, size: 1 });
+}
+
+interface TikTokPoolLike {
+  tiktok(request: TikTokWorkerRequest, signal?: AbortSignal): Promise<TikTokExportResult>;
+  destroy(): void;
+}
+
+export interface TikTokProcessorOptions {
+  workerPool?: TikTokPoolLike;
+  createWorker?: ImageWorkerFactory;
+  exportOnMainThread?: (
+    input: Blob,
+    signal: AbortSignal,
+  ) => Promise<TikTokExportResult>;
+}
+
+export interface TikTokProcessor {
+  readonly size: 1;
+  readonly destroyed: boolean;
+  export(
+    input: Blob,
+    correlation: { id: string; generation: number },
+    signal?: AbortSignal,
+  ): Promise<TikTokExportResult>;
+  destroy(): void;
+}
+
+export function createTikTokProcessor(
+  options: TikTokProcessorOptions = {},
+): TikTokProcessor {
+  const pool =
+    options.workerPool ??
+    createTikTokWorkerPool({ createWorker: options.createWorker });
+  const exportOnMainThread =
+    options.exportOnMainThread ??
+    ((input: Blob, signal: AbortSignal) =>
+      exportForTikTok(input, signal, { adapter: createHtmlTikTokAdapter() }));
+  let terminal = false;
+  let fallbackTail: Promise<void> = Promise.resolve();
+  const activeControllers = new Set<AbortController>();
+
+  const serializeFallback = <Result>(run: () => Promise<Result>): Promise<Result> => {
+    const operation = fallbackTail.then(run, run);
+    fallbackTail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  };
+
+  return {
+    size: 1,
+    get destroyed() {
+      return terminal;
+    },
+    async export(input, correlation, signal) {
+      if (terminal) throw new Error("El procesador TikTok fue destruido.");
+      if (signal?.aborted) throw abortError(signal.reason);
+      const controller = new AbortController();
+      const relayAbort = () => controller.abort(signal?.reason);
+      signal?.addEventListener("abort", relayAbort, { once: true });
+      activeControllers.add(controller);
+      try {
+        const bytes = await input.arrayBuffer();
+        throwIfAborted(controller.signal);
+        try {
+          return await pool.tiktok(
+            {
+              id: correlation.id,
+              generation: correlation.generation,
+              kind: "tiktok",
+              bytes,
+              mimeType: input.type,
+            },
+            controller.signal,
+          );
+        } catch (error) {
+          if (!(error instanceof TikTokWorkerFallbackError)) throw error;
+          return await serializeFallback(async () => {
+            throwIfAborted(controller.signal);
+            if (terminal) throw abortError("El procesador TikTok fue destruido.");
+            return exportOnMainThread(input, controller.signal);
+          });
+        }
+      } finally {
+        signal?.removeEventListener("abort", relayAbort);
+        activeControllers.delete(controller);
+      }
+    },
+    destroy() {
+      if (terminal) return;
+      terminal = true;
+      for (const controller of activeControllers) {
+        controller.abort("El procesador TikTok fue destruido.");
+      }
+      activeControllers.clear();
+      pool.destroy();
     },
   };
 }
@@ -405,7 +588,7 @@ function yieldToMainThread(): Promise<void> {
  * observable around parsing; the synchronous cleanBytes call itself is not preemptible.
  */
 export async function cleanOnMainThread(
-  request: WorkerRequest,
+  request: CleanWorkerRequest,
   signal: AbortSignal,
 ): Promise<CleanResult> {
   throwIfAborted(signal);

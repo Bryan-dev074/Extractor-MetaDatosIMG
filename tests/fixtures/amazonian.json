@@ -1,0 +1,40 @@
+{
+  "width": 1536,
+  "height": 2752,
+  "sourceDirectory": "D:\\ElaBela\\POST\\99 - Archivo\\Versiones duplicadas\\01 - Carruseles\\9x16\\Tarte Amazonian Clay",
+  "intermediateDirectory": "D:\\ElaBela\\POST\\01 - Carruseles\\9x16\\Tarte - Amazonian Clay 16-Hour Foundation",
+  "pairs": [
+    {
+      "source": "1.jpg",
+      "sourceSha256": "DAF0D38F519B088382190CA3E3734C624998F0B1899FE05DDFC7C3FBAC1BD1C2",
+      "intermediate": "01.jpg",
+      "intermediateSha256": "851E5237BA4F13C86CB3079B18F3634C3C494BA25B42C2E791F52924F4A4ED05",
+      "smoothCrop": { "left": 96, "top": 1000, "width": 500, "height": 400 },
+      "textCrop": { "left": 80, "top": 120, "width": 1376, "height": 850 }
+    },
+    {
+      "source": "2.jpg",
+      "sourceSha256": "10E7A8E9B60E366CEE054E4B73134ED92567FC0B7AB07A60CFB7021FC5310477",
+      "intermediate": "03.jpg",
+      "intermediateSha256": "BD8F11808FBBEB533CF592E9388CF074C056817C154D2F0DC7C4688BFB8E5EA3",
+      "smoothCrop": { "left": 1080, "top": 80, "width": 360, "height": 600 },
+      "textCrop": { "left": 60, "top": 100, "width": 1380, "height": 760 }
+    },
+    {
+      "source": "3.jpg",
+      "sourceSha256": "19010CA8E1BE2A75A6578914656C1F7E87FE5055DE8E814F6BE0908846891BB0",
+      "intermediate": "05.jpg",
+      "intermediateSha256": "6E93E16C7DDE37DDBA020A8479D15AF6D07CE4EFECEB93032A0BB832A0B277DF",
+      "smoothCrop": { "left": 60, "top": 2350, "width": 440, "height": 300 },
+      "textCrop": { "left": 50, "top": 140, "width": 1436, "height": 720 }
+    }
+  ],
+  "thresholds": {
+    "maxEqualNeighborRatioVsQ90": 0.96,
+    "maxEqualNeighborRatioVsDirectQ100": 0.98,
+    "maxBlockinessRatioVsQ90": 0.97,
+    "maxBlockinessRatioVsDirectQ100": 0.97,
+    "minTextEdgeRetention": 0.99,
+    "minEligibleFraction": 0.75
+  }
+}

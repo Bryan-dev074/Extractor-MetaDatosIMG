@@ -1,22 +1,30 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createImageWorkerPool,
+  createTikTokProcessor,
+  createTikTokWorkerPool,
+  TikTokWorkerFallbackError,
+  type CleanWorkerRequest,
   type ImageWorker,
-  type WorkerRequest,
+  type ImageWorkerRequest,
   type WorkerResponse,
 } from "@/lib/batch/worker-pool";
-import { handleCleanWorkerRequest } from "@/workers/image-worker";
+import {
+  handleCleanWorkerRequest,
+  handleTikTokWorkerRequest,
+} from "@/workers/image-worker";
 import { jpegWithComment } from "@/tests/fixtures/images";
 import type { CleanResult } from "@/lib/types";
+import type { TikTokExportResult } from "@/lib/tiktok/export";
 
 type WorkerEventType = "message" | "error" | "messageerror";
 
 class FakeWorker implements ImageWorker {
-  readonly posted: Array<{ message: WorkerRequest; transfer: Transferable[] }> = [];
+  readonly posted: Array<{ message: ImageWorkerRequest; transfer: Transferable[] }> = [];
   readonly terminate = vi.fn();
   private readonly listeners = new Map<WorkerEventType, Set<EventListenerOrEventListenerObject>>();
 
-  postMessage(message: WorkerRequest, transfer: Transferable[]): void {
+  postMessage(message: ImageWorkerRequest, transfer: Transferable[]): void {
     this.posted.push({ message, transfer });
   }
 
@@ -72,7 +80,11 @@ function workerFactory() {
   };
 }
 
-function request(id: string, generation = 1, bytes = Uint8Array.of(1, 2, 3).buffer): WorkerRequest {
+function request(
+  id: string,
+  generation = 1,
+  bytes = Uint8Array.of(1, 2, 3).buffer,
+): CleanWorkerRequest {
   return { id, generation, kind: "clean", bytes };
 }
 
@@ -93,7 +105,8 @@ function result(cleaned: Uint8Array = Uint8Array.of(9, 8)): CleanResult {
   };
 }
 
-function success(message: WorkerRequest, cleaned?: Uint8Array): WorkerResponse {
+function success(message: ImageWorkerRequest, cleaned?: Uint8Array): WorkerResponse {
+  if (message.kind !== "clean") throw new Error("Se esperaba una solicitud clean.");
   return {
     id: message.id,
     generation: message.generation,
@@ -478,5 +491,219 @@ describe("clean worker protocol", () => {
       },
       transfer: [],
     });
+  });
+});
+
+function tiktokResult(): TikTokExportResult {
+  return {
+    png: Uint8Array.of(1, 2, 3),
+    preview: Uint8Array.of(4, 5),
+    width: 10,
+    height: 20,
+    seed: 42,
+    outputExtension: ".png",
+    approximate: true,
+    eligiblePixels: 10,
+    eligibleFraction: 0.05,
+    changedSamples: 20,
+    sumDelta: 0,
+    meanDelta: 0,
+  };
+}
+
+describe("TikTok worker protocol", () => {
+  it("uses a dedicated concurrency-one pool and transfers the input buffer", async () => {
+    const factory = workerFactory();
+    const pool = createTikTokWorkerPool({ createWorker: factory.createWorker });
+    const bytes = Uint8Array.of(1, 2, 3).buffer;
+    const work = pool.tiktok({
+      id: "tt",
+      generation: 4,
+      kind: "tiktok",
+      bytes,
+      mimeType: "image/jpeg",
+    });
+
+    expect(pool.size).toBe(1);
+    expect(factory.workers).toHaveLength(1);
+    expect(factory.workers[0].posted[0].transfer).toEqual([bytes]);
+    factory.workers[0].emitMessage({
+      id: "tt",
+      generation: 4,
+      kind: "tiktok",
+      ok: true,
+      result: tiktokResult(),
+    });
+    await expect(work).resolves.toMatchObject({ width: 10, approximate: true });
+  });
+
+  it("correlates kind and generation before accepting a TikTok response", async () => {
+    const factory = workerFactory();
+    const pool = createTikTokWorkerPool({ createWorker: factory.createWorker });
+    const work = pool.tiktok({
+      id: "tt",
+      generation: 7,
+      kind: "tiktok",
+      bytes: Uint8Array.of(1).buffer,
+      mimeType: "image/png",
+    });
+    let settled = false;
+    void work.finally(() => {
+      settled = true;
+    });
+    factory.workers[0].emitMessage({
+      id: "tt",
+      generation: 6,
+      kind: "tiktok",
+      ok: true,
+      result: tiktokResult(),
+    });
+    factory.workers[0].emitMessage({
+      id: "tt",
+      generation: 7,
+      kind: "clean",
+      ok: true,
+      result: result(),
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    factory.workers[0].emitMessage({
+      id: "tt",
+      generation: 7,
+      kind: "tiktok",
+      ok: true,
+      result: tiktokResult(),
+    });
+    await expect(work).resolves.toMatchObject({ seed: 42 });
+  });
+
+  it("keeps the worker reusable after a TikTok application error", async () => {
+    const factory = workerFactory();
+    const pool = createTikTokWorkerPool({ createWorker: factory.createWorker });
+    const firstRequest = {
+      id: "a",
+      generation: 1,
+      kind: "tiktok",
+      bytes: Uint8Array.of(1).buffer,
+      mimeType: "image/png",
+    } as const;
+    const first = pool.tiktok(firstRequest);
+    factory.workers[0].emitMessage({
+      id: "a",
+      generation: 1,
+      kind: "tiktok",
+      ok: false,
+      error: "APNG no compatible",
+    });
+    await expect(first).rejects.toThrow("APNG no compatible");
+
+    const second = pool.tiktok({
+      ...firstRequest,
+      generation: 2,
+      bytes: Uint8Array.of(2).buffer,
+    });
+    expect(factory.workers).toHaveLength(1);
+    expect(factory.workers[0].terminate).not.toHaveBeenCalled();
+    factory.workers[0].emitMessage({
+      id: "a",
+      generation: 2,
+      kind: "tiktok",
+      ok: true,
+      result: tiktokResult(),
+    });
+    await expect(second).resolves.toMatchObject({ outputExtension: ".png" });
+  });
+
+  it("replaces the TikTok worker after active cancellation", async () => {
+    const factory = workerFactory();
+    const pool = createTikTokWorkerPool({ createWorker: factory.createWorker });
+    const controller = new AbortController();
+    const work = pool.tiktok(
+      {
+        id: "cancel",
+        generation: 1,
+        kind: "tiktok",
+        bytes: Uint8Array.of(1).buffer,
+        mimeType: "image/jpeg",
+      },
+      controller.signal,
+    );
+    controller.abort();
+
+    await expect(work).rejects.toMatchObject({ name: "AbortError" });
+    expect(factory.workers[0].terminate).toHaveBeenCalledOnce();
+    expect(factory.workers).toHaveLength(2);
+  });
+
+  it("returns exact PNG and preview transfers from the worker handler", async () => {
+    const produced = tiktokResult();
+    produced.png = new Uint8Array(Uint8Array.of(9, 1, 2, 8).buffer, 1, 2);
+    produced.preview = new Uint8Array(Uint8Array.of(7, 3, 4, 6).buffer, 1, 2);
+    const reply = await handleTikTokWorkerRequest(
+      {
+        id: "tt",
+        generation: 9,
+        kind: "tiktok",
+        bytes: Uint8Array.of(0xff, 0xd8, 0xff).buffer,
+        mimeType: "image/jpeg",
+      },
+      async () => produced,
+    );
+
+    expect(reply.message).toMatchObject({
+      id: "tt",
+      generation: 9,
+      kind: "tiktok",
+      ok: true,
+    });
+    if (!reply.message.ok || reply.message.kind !== "tiktok") {
+      throw new Error("respuesta inesperada");
+    }
+    expect(reply.message.result.png.byteOffset).toBe(0);
+    expect(reply.message.result.preview.byteOffset).toBe(0);
+    expect(reply.transfer).toEqual([
+      reply.message.result.png.buffer,
+      reply.message.result.preview.buffer,
+    ]);
+  });
+
+  it("serializes the main-thread fallback at concurrency one", async () => {
+    const releases: Array<() => void> = [];
+    let running = 0;
+    let peak = 0;
+    const workerPool = {
+      tiktok: vi.fn().mockRejectedValue(new TikTokWorkerFallbackError("sin OffscreenCanvas")),
+      destroy: vi.fn(),
+    };
+    const processor = createTikTokProcessor({
+      workerPool,
+      async exportOnMainThread() {
+        running += 1;
+        peak = Math.max(peak, running);
+        await new Promise<void>((resolve) => releases.push(resolve));
+        running -= 1;
+        return tiktokResult();
+      },
+    });
+    const first = processor.export(
+      new Blob([Uint8Array.of(1)]),
+      { id: "a", generation: 1 },
+    );
+    const second = processor.export(
+      new Blob([Uint8Array.of(2)]),
+      { id: "b", generation: 1 },
+    );
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    expect(peak).toBe(1);
+    releases.shift()?.();
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    expect(peak).toBe(1);
+    releases.shift()?.();
+
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    expect(workerPool.tiktok).toHaveBeenCalledTimes(2);
+    processor.destroy();
+    expect(workerPool.destroy).toHaveBeenCalledOnce();
   });
 });

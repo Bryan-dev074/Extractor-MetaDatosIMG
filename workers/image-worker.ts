@@ -1,15 +1,30 @@
 import { cleanBytes } from "../lib/cleaner";
-import type { WorkerRequest, WorkerResponse } from "../lib/batch/worker-pool";
+import type {
+  CleanWorkerRequest,
+  ImageWorkerRequest,
+  TikTokWorkerRequest,
+  WorkerResponse,
+} from "../lib/batch/worker-pool";
+import {
+  exportForTikTok,
+  TikTokMainThreadFallbackRequiredError,
+  type TikTokExportResult,
+} from "../lib/tiktok/export";
 
 export interface CleanWorkerReply {
-  message: WorkerResponse;
+  message: Extract<WorkerResponse, { kind: "clean" }>;
+  transfer: Transferable[];
+}
+
+export interface TikTokWorkerReply {
+  message: Extract<WorkerResponse, { kind: "tiktok" }>;
   transfer: Transferable[];
 }
 
 interface ImageWorkerScope {
   addEventListener(
     type: "message",
-    listener: (event: MessageEvent<WorkerRequest>) => void,
+    listener: (event: MessageEvent<ImageWorkerRequest>) => void,
   ): void;
   postMessage(message: WorkerResponse, transfer: Transferable[]): void;
 }
@@ -29,7 +44,7 @@ function messageFor(error: unknown): string {
   return error instanceof Error && error.message ? error.message : "Error al limpiar la imagen.";
 }
 
-export function handleCleanWorkerRequest(request: WorkerRequest): CleanWorkerReply {
+export function handleCleanWorkerRequest(request: CleanWorkerRequest): CleanWorkerReply {
   try {
     const result = cleanBytes(new Uint8Array(request.bytes));
     const output = exactArrayBuffer(result.cleaned);
@@ -58,10 +73,68 @@ export function handleCleanWorkerRequest(request: WorkerRequest): CleanWorkerRep
   }
 }
 
+function exactBytes(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  if (
+    bytes.buffer instanceof ArrayBuffer &&
+    bytes.byteOffset === 0 &&
+    bytes.byteLength === bytes.buffer.byteLength
+  ) {
+    return bytes as Uint8Array<ArrayBuffer>;
+  }
+  return Uint8Array.from(bytes);
+}
+
+function needsMainThreadFallback(error: unknown): boolean {
+  return (
+    error instanceof TikTokMainThreadFallbackRequiredError ||
+    (typeof error === "object" &&
+      error !== null &&
+      "fallbackRequired" in error &&
+      error.fallbackRequired === true)
+  );
+}
+
+export async function handleTikTokWorkerRequest(
+  request: TikTokWorkerRequest,
+  exporter: (input: Blob) => Promise<TikTokExportResult> = (input) =>
+    exportForTikTok(input),
+): Promise<TikTokWorkerReply> {
+  try {
+    const result = await exporter(new Blob([request.bytes], { type: request.mimeType }));
+    const png = exactBytes(result.png);
+    const preview = exactBytes(result.preview);
+    return {
+      message: {
+        id: request.id,
+        generation: request.generation,
+        kind: "tiktok",
+        ok: true,
+        result: { ...result, png, preview },
+      },
+      transfer: [png.buffer, preview.buffer],
+    };
+  } catch (error) {
+    return {
+      message: {
+        id: request.id,
+        generation: request.generation,
+        kind: "tiktok",
+        ok: false,
+        error: messageFor(error),
+        fallbackRequired: needsMainThreadFallback(error) || undefined,
+      },
+      transfer: [],
+    };
+  }
+}
+
 if (typeof document === "undefined") {
   const workerScope = globalThis as unknown as ImageWorkerScope;
-  workerScope.addEventListener("message", (event) => {
-    const reply = handleCleanWorkerRequest(event.data);
+  workerScope.addEventListener("message", async (event) => {
+    const reply =
+      event.data.kind === "clean"
+        ? handleCleanWorkerRequest(event.data)
+        : await handleTikTokWorkerRequest(event.data);
     workerScope.postMessage(reply.message, reply.transfer);
   });
 }
