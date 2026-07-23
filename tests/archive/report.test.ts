@@ -147,4 +147,31 @@ describe("planArchive", () => {
     );
     expect(plan.entries[0].path).toBe("Raíz/Sub/foto-tiktok.png");
   });
+
+  it("sanitizes the archive base and gives each mode an explicit ZIP name", () => {
+    const input = {
+      archiveBase: "Fotos: 2026",
+      outputs: [output()],
+      skipped: [],
+      failed: [],
+    };
+
+    const clean = planArchive(input, "clean");
+    const tiktok = planArchive(
+      {
+        ...input,
+        outputs: [
+          output({
+            qualityVerified: false,
+            outputExtension: undefined,
+          }),
+        ],
+      },
+      "tiktok",
+    );
+
+    expect(clean.archiveBase).toBe("Fotos_ 2026");
+    expect(clean.suggestedName).toBe("Fotos_ 2026-limpia.zip");
+    expect(tiktok.suggestedName).toBe("Fotos_ 2026-tiktok.zip");
+  });
 });

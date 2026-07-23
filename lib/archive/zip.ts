@@ -7,7 +7,7 @@ import {
   type ReportSkipped,
 } from "./report";
 
-const FIXED_ZIP_DATE = new Date(1980, 0, 1, 0, 0, 0, 0);
+const FIXED_ZIP_DATE = new Date(Date.UTC(1980, 0, 1));
 const ZIP32_LIMIT = 0xffff_ffff;
 const ZIP32_MAX_ENTRIES = 65_535;
 const ZIP32_MAX_NAME_BYTES = 65_535;
@@ -129,6 +129,34 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw abortError();
 }
 
+function awaitWithAbort<T>(
+  operation: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return operation;
+  if (signal.aborted) {
+    void operation.catch(() => undefined);
+    return Promise.reject(abortError());
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(abortError()));
+
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
 function checkedAdd(left: number, right: number, label: string): number {
   if (
     !Number.isSafeInteger(left) ||
@@ -216,7 +244,7 @@ export function planArchive(
 
   return {
     archiveBase,
-    suggestedName: `${archiveBase}.zip`,
+    suggestedName: `${archiveBase}-${mode === "clean" ? "limpia" : "tiktok"}.zip`,
     mode,
     entries,
     report,
@@ -253,9 +281,15 @@ export function estimateArchiveSize(plan: ArchivePlan): ArchiveSizeEstimate {
     ensureZip32Value(size, `El tamaño de ${normalizedPath}`);
     payloadBytes = checkedAdd(payloadBytes, size, "El tamaño total retenido");
 
-    const unicodeExtra = /[^\x20-\x7e]/u.test(normalizedPath)
+    const usesUnicodePathExtra = nameBytes !== normalizedPath.length;
+    const unicodeExtra = usesUnicodePathExtra
       ? checkedAdd(9, nameBytes, "El campo Unicode del ZIP")
       : 0;
+    if (unicodeExtra > ZIP32_MAX_NAME_BYTES) {
+      throw new Error(
+        `El campo extra Unicode de ${normalizedPath.slice(0, 80)} excede el límite de ZIP32.`,
+      );
+    }
     const localOverhead = checkedAdd(
       checkedAdd(46, nameBytes, "La cabecera local del ZIP"),
       unicodeExtra,
@@ -477,7 +511,10 @@ async function generateArchiveInternal(
 
     let result: ArchiveResult;
     if (options.destination.kind === "writer") {
-      await options.destination.writer.close();
+      await awaitWithAbort(
+        options.destination.writer.close(),
+        options.signal,
+      );
       result = {
         kind: "writer",
         suggestedName: plan.suggestedName,

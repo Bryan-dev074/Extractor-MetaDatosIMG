@@ -106,6 +106,44 @@ describe("archive generation", () => {
     );
   });
 
+  it("writes the fixed 1980-01-01 UTC date into local and central DOS headers", async () => {
+    const archive = await generateArchive(plan(), {
+      destination: { kind: "blob" },
+    });
+    if (archive.kind !== "blob") throw new Error("Expected Blob archive");
+    const bytes = new Uint8Array(await archive.blob.arrayBuffer());
+    let localHeaders = 0;
+    let centralHeaders = 0;
+
+    for (let offset = 0; offset + 16 < bytes.length; offset += 1) {
+      const isSignature =
+        bytes[offset] === 0x50 && bytes[offset + 1] === 0x4b;
+      if (
+        isSignature &&
+        bytes[offset + 2] === 0x03 &&
+        bytes[offset + 3] === 0x04
+      ) {
+        localHeaders += 1;
+        expect(Array.from(bytes.slice(offset + 10, offset + 14))).toEqual([
+          0x00, 0x00, 0x21, 0x00,
+        ]);
+      }
+      if (
+        isSignature &&
+        bytes[offset + 2] === 0x01 &&
+        bytes[offset + 3] === 0x02
+      ) {
+        centralHeaders += 1;
+        expect(Array.from(bytes.slice(offset + 12, offset + 16))).toEqual([
+          0x00, 0x00, 0x21, 0x00,
+        ]);
+      }
+    }
+
+    expect(localHeaders).toBe(2);
+    expect(centralHeaders).toBe(2);
+  });
+
   it("writes direct and Blob destinations with equivalent entries", async () => {
     const chunks: Uint8Array[] = [];
     const writer: ArchiveWriter = {
@@ -297,6 +335,55 @@ describe("archive generation", () => {
     expect(writer.abort).toHaveBeenCalledTimes(1);
   });
 
+  it("cancels immediately while close is pending and observes its late rejection", async () => {
+    const controller = new AbortController();
+    let markCloseStarted!: () => void;
+    let rejectClose!: (error: Error) => void;
+    const closeStarted = new Promise<void>((resolve) => {
+      markCloseStarted = resolve;
+    });
+    const pendingClose = new Promise<void>((_resolve, reject) => {
+      rejectClose = reject;
+    });
+    const progress = vi.fn();
+    const writer: ArchiveWriter = {
+      write: vi.fn().mockResolvedValue(undefined),
+      close: () => {
+        markCloseStarted();
+        return pendingClose;
+      },
+      abort: vi.fn().mockRejectedValue(new Error("falló abort secundario")),
+    };
+
+    const pending = generateArchive(plan(), {
+      destination: { kind: "writer", writer },
+      signal: controller.signal,
+      onProgress: progress,
+    });
+    const observed = pending.then(
+      () => "resolved" as const,
+      (error: unknown) => error,
+    );
+    await closeStarted;
+    controller.abort();
+
+    const immediate = await Promise.race([
+      observed,
+      new Promise<"timeout">((resolve) =>
+        setTimeout(() => resolve("timeout"), 100),
+      ),
+    ]);
+    const terminalProgressCalls = progress.mock.calls.length;
+    rejectClose(new Error("falló close después de cancelar"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(immediate).toMatchObject({ name: "AbortError" });
+    await expect(observed).resolves.toMatchObject({ name: "AbortError" });
+    expect(writer.abort).toHaveBeenCalledTimes(1);
+    expect(progress).toHaveBeenCalledTimes(terminalProgressCalls);
+    expect(progress).not.toHaveBeenCalledWith(100);
+  });
+
   it.each([
     ["write", "falló escritura"],
     ["close", "falló cierre"],
@@ -395,6 +482,48 @@ describe("archive preflight", () => {
         ],
       }),
     ).toThrow(/seguro|ZIP32/i);
+  });
+
+  it("accounts for the Info-ZIP Unicode path extra-field 16-bit boundary", async () => {
+    const base = plan();
+    const entry = base.entries[0];
+    const asciiAtLimit = "a".repeat(65_535);
+    const unicodeAtLimit = `á${"a".repeat(65_524)}`;
+    const unicodeOverLimit = `á${"a".repeat(65_525)}`;
+
+    expect(new TextEncoder().encode(asciiAtLimit)).toHaveLength(65_535);
+    expect(new TextEncoder().encode(unicodeAtLimit)).toHaveLength(65_526);
+    expect(() =>
+      preflightArchive({
+        ...base,
+        entries: [{ ...entry, path: asciiAtLimit }],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      preflightArchive({
+        ...base,
+        entries: [{ ...entry, path: unicodeAtLimit }],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      preflightArchive({
+        ...base,
+        entries: [{ ...entry, path: unicodeOverLimit }],
+      }),
+    ).toThrow(/Unicode|ZIP32|extra/i);
+
+    const generated = await generateArchive(
+      {
+        ...base,
+        entries: [{ ...entry, path: unicodeAtLimit }],
+      },
+      { destination: { kind: "blob" } },
+    );
+    if (generated.kind !== "blob") throw new Error("Expected Blob archive");
+    const opened = await JSZip.loadAsync(generated.blob);
+    expect(await opened.file(unicodeAtLimit)!.async("uint8array")).toEqual(
+      entry.bytes,
+    );
   });
 
   it("rejects Blob fallback before generation when the conservative budget is exceeded", async () => {
