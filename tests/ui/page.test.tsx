@@ -208,10 +208,16 @@ describe("workbench page", () => {
     render(<Home />);
 
     expect(
-      screen.getByRole("heading", { name: "Lote inspeccionado" }),
+      screen.getByRole("heading", { name: "Preparando selección" }),
     ).toBeVisible();
+    expect(
+      screen.queryByRole("heading", { name: "Lote inspeccionado" }),
+    ).not.toBeInTheDocument();
     expect(screen.getByText("Preparando 1 imagen…")).toBeVisible();
     expect(screen.getByText("1 imagen preparándose")).toBeVisible();
+    expect(
+      screen.getByRole("region", { name: "Rutas y resultados" }),
+    ).toHaveAttribute("aria-busy", "false");
     expect(
       screen.queryByText("0 listas, 0 con error, 0 omitidas"),
     ).not.toBeInTheDocument();
@@ -234,6 +240,9 @@ describe("workbench page", () => {
 
     expect(
       screen.getByText("No se encontraron imágenes JPEG o PNG válidas."),
+    ).toBeVisible();
+    expect(
+      screen.getByText("Abre “Ver motivos” para revisar cada motivo."),
     ).toBeVisible();
     const disclosure = container.querySelector("details.skipped-disclosure");
     expect(disclosure).not.toHaveAttribute("open");

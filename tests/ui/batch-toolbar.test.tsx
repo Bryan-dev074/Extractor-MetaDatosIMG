@@ -39,6 +39,34 @@ function actions(): BatchToolbarActions {
 afterEach(cleanup);
 
 describe("BatchToolbar", () => {
+  it("shows an indeterminate preparation state while accepted files are registering", () => {
+    render(
+      <BatchToolbar
+        summary={{ ...settledSummary, total: 0, completed: 0 }}
+        skipped={0}
+        pendingRegistrationCount={1}
+        cleanReadyCount={0}
+        tiktokReadyCount={0}
+        tiktokBatchStatus="idle"
+        archive={{ kind: "idle", mode: null, progress: 0 }}
+        actions={actions()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Preparando selección" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("heading", { name: "Lote inspeccionado" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("progressbar", { name: "Preparación de la selección" }),
+    ).not.toHaveAttribute("value");
+    expect(
+      screen.getByRole("button", { name: "Descargar carpeta limpia" }),
+    ).toBeDisabled();
+  });
+
   it("keeps ZIP actions disabled until their required outputs exist", () => {
     render(
       <BatchToolbar

@@ -20,6 +20,7 @@ export interface BatchToolbarActions {
 interface BatchToolbarProps {
   summary: BatchSummary;
   skipped: number;
+  pendingRegistrationCount?: number;
   cleanReadyCount: number;
   tiktokReadyCount: number;
   tiktokBatchStatus: TikTokBatchStatus;
@@ -30,6 +31,7 @@ interface BatchToolbarProps {
 export default function BatchToolbar({
   summary,
   skipped,
+  pendingRegistrationCount = 0,
   cleanReadyCount,
   tiktokReadyCount,
   tiktokBatchStatus,
@@ -37,7 +39,8 @@ export default function BatchToolbar({
   actions,
 }: BatchToolbarProps) {
   const live = summary.queued + summary.processing;
-  const settled = live === 0;
+  const registering = pendingRegistrationCount > 0;
+  const settled = live === 0 && !registering;
   const completedPercent =
     summary.total === 0
       ? 0
@@ -55,16 +58,26 @@ export default function BatchToolbar({
           <div>
             <p className="eyebrow">Inspección del lote</p>
             <h2 id="batch-progress-title">
-              {live > 0 ? "Procesando en el dispositivo" : "Lote inspeccionado"}
+              {registering
+                ? "Preparando selección"
+                : live > 0
+                  ? "Procesando en el dispositivo"
+                  : "Lote inspeccionado"}
             </h2>
           </div>
-          <strong className="progress-value">{completedPercent}%</strong>
+          <strong className="progress-value">
+            {registering ? "…" : `${completedPercent}%`}
+          </strong>
         </div>
-        <progress
-          aria-label="Progreso del lote"
-          max={summary.total || 1}
-          value={summary.completed + summary.failed + summary.cancelled}
-        />
+        {registering ? (
+          <progress aria-label="Preparación de la selección" max={1} />
+        ) : (
+          <progress
+            aria-label="Progreso del lote"
+            max={summary.total || 1}
+            value={summary.completed + summary.failed + summary.cancelled}
+          />
+        )}
         <div className="batch-counters" aria-live="polite">
           <span>En cola {summary.queued}</span>
           <span>Activas {summary.processing}</span>

@@ -139,6 +139,7 @@ export default function Home() {
               <BatchToolbar
                 summary={workspace.batch.summary}
                 skipped={workspace.skipped.length}
+                pendingRegistrationCount={pendingRegistrationCount}
                 cleanReadyCount={workspace.cleanReadyCount}
                 tiktokReadyCount={workspace.tiktokReadyCount}
                 tiktokBatchStatus={workspace.tiktokBatchStatus}
@@ -166,9 +167,7 @@ export default function Home() {
               <section
                 className="results-panel"
                 aria-labelledby="results-title"
-                aria-busy={
-                  liveCount > 0 || tiktokBusy || pendingRegistrationCount > 0
-                }
+                aria-busy={liveCount > 0 || tiktokBusy}
               >
                 <div className="results-panel__heading">
                   <div>
@@ -229,7 +228,7 @@ export default function Home() {
                           No se encontraron imágenes JPEG o PNG válidas.
                         </strong>
                         <span>
-                          Abre “Archivos omitidos” para revisar cada motivo.
+                          Abre “Ver motivos” para revisar cada motivo.
                         </span>
                       </>
                     ) : null}
