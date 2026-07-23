@@ -28,6 +28,11 @@ export default function Home() {
 
   const liveCount =
     workspace.batch.summary.queued + workspace.batch.summary.processing;
+  const tiktokBusy = Object.values(workspace.tiktokById).some(
+    (state) => state.status === "queued" || state.status === "processing",
+  );
+  const pauseAmbientMotion =
+    liveCount > 0 || workspace.archive.kind === "running" || tiktokBusy;
   const resultSummary = useMemo(
     () =>
       `${workspace.batch.summary.completed} listas, ${workspace.batch.summary.failed} con error, ${workspace.skipped.length} omitidas`,
@@ -43,7 +48,7 @@ export default function Home() {
       <a className="skip-link" href="#contenido">
         Saltar al contenido
       </a>
-      <InteractiveBackground />
+      <InteractiveBackground paused={pauseAmbientMotion} />
       <div className="visual-backdrop" aria-hidden="true">
         <span className="aurora aurora--violet" />
         <span className="aurora aurora--cyan" />
@@ -118,6 +123,7 @@ export default function Home() {
                 skipped={workspace.skipped.length}
                 cleanReadyCount={workspace.cleanReadyCount}
                 tiktokReadyCount={workspace.tiktokReadyCount}
+                tiktokBatchStatus={workspace.tiktokBatchStatus}
                 archive={workspace.archive}
                 actions={{
                   cancelBatch: workspace.cancelBatch,
@@ -161,7 +167,7 @@ export default function Home() {
               <section
                 className="results-panel"
                 aria-labelledby="results-title"
-                aria-busy={liveCount > 0}
+                aria-busy={liveCount > 0 || tiktokBusy}
               >
                 <div className="results-panel__heading">
                   <div>
@@ -173,7 +179,13 @@ export default function Home() {
                   </p>
                 </div>
 
-                <div className="result-list">
+                <div
+                  className={`result-list ${
+                    workspace.batch.items.length >= 4
+                      ? "result-list--dense"
+                      : "result-list--showcase"
+                  }`}
+                >
                   {shownItems.map((item) => {
                     const tiktok =
                       (workspace.tiktokById[item.id] as TikTokItemState | undefined) ??

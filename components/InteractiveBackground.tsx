@@ -22,8 +22,21 @@ const HUES = [190, 250, 262, 300];
 const LINK_DISTANCE = 136;
 const FRAME_INTERVAL = 1000 / 30;
 
-export default function InteractiveBackground() {
+interface InteractiveBackgroundProps {
+  paused?: boolean;
+}
+
+interface AnimationControl {
+  sync(): void;
+}
+
+export default function InteractiveBackground({
+  paused = false,
+}: InteractiveBackgroundProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const pausedRef = useRef(paused);
+  const animationControlRef = useRef<AnimationControl | null>(null);
+  pausedRef.current = paused;
 
   useEffect(() => {
     if (navigator.userAgent.includes("jsdom")) return;
@@ -45,7 +58,7 @@ export default function InteractiveBackground() {
     let dpr = 1;
     let frame = 0;
     let lastFrame = 0;
-    let running = !document.hidden;
+    let running = !document.hidden && !pausedRef.current;
 
     function resize() {
       width = window.innerWidth;
@@ -76,7 +89,7 @@ export default function InteractiveBackground() {
       context.clearRect(0, 0, width, height);
 
       for (const particle of particles) {
-        if (!reduceMotion) {
+        if (!reduceMotion && !pausedRef.current) {
           particle.x += particle.vx;
           particle.y += particle.vy;
           if (particle.x < -8) particle.x = width + 8;
@@ -182,14 +195,25 @@ export default function InteractiveBackground() {
 
     function start() {
       window.cancelAnimationFrame(frame);
-      if (reduceMotion) {
+      if (reduceMotion || pausedRef.current) {
         draw();
         return;
       }
       if (running) frame = window.requestAnimationFrame(animate);
     }
 
+    function syncAnimation() {
+      running = !document.hidden && !pausedRef.current;
+      window.cancelAnimationFrame(frame);
+      if (running) {
+        start();
+      } else if (!document.hidden) {
+        draw();
+      }
+    }
+
     function onPointerMove(event: PointerEvent) {
+      if (pausedRef.current) return;
       pointer.x = event.clientX;
       pointer.y = event.clientY;
     }
@@ -200,6 +224,7 @@ export default function InteractiveBackground() {
     }
 
     function onClick(event: MouseEvent) {
+      if (pausedRef.current) return;
       const target = event.target as HTMLElement | null;
       if (target?.closest("button, a, input, summary, label, [data-no-ripple]")) {
         return;
@@ -214,14 +239,18 @@ export default function InteractiveBackground() {
     }
 
     function onVisibilityChange() {
-      running = !document.hidden;
-      if (running) start();
-      else window.cancelAnimationFrame(frame);
+      syncAnimation();
+    }
+
+    function onResize() {
+      resize();
+      if (reduceMotion || pausedRef.current) draw();
     }
 
     resize();
     start();
-    window.addEventListener("resize", resize);
+    animationControlRef.current = { sync: syncAnimation };
+    window.addEventListener("resize", onResize);
     window.addEventListener("pointermove", onPointerMove, { passive: true });
     window.addEventListener("pointerleave", onPointerLeave);
     window.addEventListener("click", onClick);
@@ -229,13 +258,18 @@ export default function InteractiveBackground() {
 
     return () => {
       window.cancelAnimationFrame(frame);
-      window.removeEventListener("resize", resize);
+      animationControlRef.current = null;
+      window.removeEventListener("resize", onResize);
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerleave", onPointerLeave);
       window.removeEventListener("click", onClick);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, []);
+
+  useEffect(() => {
+    animationControlRef.current?.sync();
+  }, [paused]);
 
   return (
     <canvas

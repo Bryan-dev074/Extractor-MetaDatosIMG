@@ -18,6 +18,13 @@ const summary: BatchSummary = {
   removedBytes: 200,
 };
 
+const settledSummary: BatchSummary = {
+  ...summary,
+  queued: 0,
+  processing: 0,
+  completed: 3,
+};
+
 function actions(): BatchToolbarActions {
   return {
     cancelBatch: vi.fn(),
@@ -39,6 +46,7 @@ describe("BatchToolbar", () => {
         skipped={2}
         cleanReadyCount={0}
         tiktokReadyCount={0}
+        tiktokBatchStatus="idle"
         archive={{ kind: "idle", mode: null, progress: 0 }}
         actions={actions()}
       />,
@@ -60,6 +68,7 @@ describe("BatchToolbar", () => {
         skipped={2}
         cleanReadyCount={1}
         tiktokReadyCount={0}
+        tiktokBatchStatus="idle"
         archive={{ kind: "running", mode: "clean", progress: 41 }}
         actions={callbacks}
       />,
@@ -75,5 +84,60 @@ describe("BatchToolbar", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Cancelar ZIP" }));
     expect(callbacks.cancelArchive).toHaveBeenCalledOnce();
+  });
+
+  it("prevents duplicate TikTok preparation and unlocks its ZIP only when settled", () => {
+    const callbacks = actions();
+    const { rerender } = render(
+      <BatchToolbar
+        summary={settledSummary}
+        skipped={0}
+        cleanReadyCount={3}
+        tiktokReadyCount={1}
+        tiktokBatchStatus="busy"
+        archive={{ kind: "idle", mode: null, progress: 0 }}
+        actions={callbacks}
+      />,
+    );
+
+    const prepare = screen.getByRole("button", {
+      name: "Preparando lote TikTok…",
+    });
+    expect(prepare).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Descargar carpeta TikTok" }),
+    ).toBeDisabled();
+    fireEvent.click(prepare);
+    expect(callbacks.prepareTikTok).not.toHaveBeenCalled();
+
+    rerender(
+      <BatchToolbar
+        summary={settledSummary}
+        skipped={0}
+        cleanReadyCount={3}
+        tiktokReadyCount={1}
+        tiktokBatchStatus="idle"
+        archive={{ kind: "idle", mode: null, progress: 0 }}
+        actions={callbacks}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Descargar carpeta TikTok" }),
+    ).toBeDisabled();
+
+    rerender(
+      <BatchToolbar
+        summary={settledSummary}
+        skipped={0}
+        cleanReadyCount={3}
+        tiktokReadyCount={1}
+        tiktokBatchStatus="settled"
+        archive={{ kind: "idle", mode: null, progress: 0 }}
+        actions={callbacks}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Descargar carpeta TikTok" }),
+    ).toBeEnabled();
   });
 });

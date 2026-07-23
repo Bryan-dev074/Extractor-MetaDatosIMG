@@ -3,7 +3,10 @@
 import React from "react";
 import { formatBytes } from "../lib/cleaner";
 import type { BatchSummary } from "../lib/batch/reducer";
-import type { ArchiveWorkspaceState } from "../hooks/useImageWorkspace";
+import type {
+  ArchiveWorkspaceState,
+  TikTokBatchStatus,
+} from "../hooks/useImageWorkspace";
 
 export interface BatchToolbarActions {
   cancelBatch(): void;
@@ -19,6 +22,7 @@ interface BatchToolbarProps {
   skipped: number;
   cleanReadyCount: number;
   tiktokReadyCount: number;
+  tiktokBatchStatus: TikTokBatchStatus;
   archive: ArchiveWorkspaceState;
   actions: BatchToolbarActions;
 }
@@ -28,6 +32,7 @@ export default function BatchToolbar({
   skipped,
   cleanReadyCount,
   tiktokReadyCount,
+  tiktokBatchStatus,
   archive,
   actions,
 }: BatchToolbarProps) {
@@ -41,6 +46,7 @@ export default function BatchToolbar({
             100,
         );
   const archiveRunning = archive.kind === "running";
+  const tiktokBatchBusy = tiktokBatchStatus === "busy";
 
   return (
     <section className="batch-toolbar" aria-labelledby="batch-progress-title">
@@ -97,15 +103,27 @@ export default function BatchToolbar({
             <button
               type="button"
               className="control control--rose-secondary"
-              disabled={!settled || cleanReadyCount === 0 || archiveRunning}
+              disabled={
+                !settled ||
+                cleanReadyCount === 0 ||
+                archiveRunning ||
+                tiktokBatchBusy
+              }
+              aria-busy={tiktokBatchBusy}
               onClick={() => void actions.prepareTikTok()}
             >
-              Preparar lote TikTok
+              {tiktokBatchBusy
+                ? "Preparando lote TikTok…"
+                : "Preparar lote TikTok"}
             </button>
             <button
               type="button"
               className="control control--rose"
-              disabled={tiktokReadyCount === 0 || archiveRunning}
+              disabled={
+                tiktokBatchStatus !== "settled" ||
+                tiktokReadyCount === 0 ||
+                archiveRunning
+              }
               onClick={() => void actions.downloadTikTokArchive()}
             >
               Descargar carpeta TikTok

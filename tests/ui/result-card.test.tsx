@@ -90,6 +90,28 @@ describe("ResultCard", () => {
     );
   });
 
+  it("gives lazy previews an explicit intrinsic aspect ratio", () => {
+    const { container } = render(
+      <ResultCard
+        item={completedItem()}
+        previewUrl="blob:preview"
+        tiktok={idleTikTok}
+        onPreviewVisibility={vi.fn()}
+        onDownloadClean={vi.fn()}
+        onGenerateTikTok={vi.fn()}
+        onDownloadTikTok={vi.fn()}
+        onDownloadTikTokPreview={vi.fn()}
+        onCancelTikTok={vi.fn()}
+        onRetry={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+    );
+
+    const preview = container.querySelector(".result-preview img");
+    expect(preview).toHaveAttribute("width", "16");
+    expect(preview).toHaveAttribute("height", "10");
+  });
+
   it("uses explicit clean and TikTok states", () => {
     const item = completedItem();
     const onGenerateTikTok = vi.fn();

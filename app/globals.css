@@ -295,7 +295,7 @@ button:disabled {
 
 .creator-link {
   display: inline-flex;
-  min-height: 40px;
+  min-height: 44px;
   align-items: center;
   gap: 7px;
   padding: 8px 13px;
@@ -1246,6 +1246,8 @@ progress::-moz-progress-bar {
   display: grid;
   min-width: 0;
   grid-template-rows: auto 1fr auto;
+  contain-intrinsic-size: auto 520px;
+  content-visibility: auto;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 18px;
@@ -1408,6 +1410,9 @@ progress::-moz-progress-bar {
 }
 
 .result-details summary {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
   padding: 11px 0 0;
   color: var(--secondary);
   font-size: 10px;
@@ -1444,7 +1449,7 @@ progress::-moz-progress-bar {
 }
 
 .result-actions .control {
-  min-height: 40px;
+  min-height: 44px;
   flex: 1 1 118px;
   padding: 8px 10px;
   font-size: 11px;
@@ -1474,6 +1479,34 @@ progress::-moz-progress-bar {
   margin-top: 0;
 }
 
+.result-list--dense {
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.result-list--dense .result-row {
+  grid-template-columns: 112px minmax(0, 1fr) minmax(220px, 0.48fr);
+  grid-template-rows: auto;
+  contain-intrinsic-size: auto 190px;
+}
+
+.result-list--dense .result-preview {
+  min-height: 100%;
+  aspect-ratio: 4 / 3;
+  border-right: 1px solid rgba(255, 255, 255, 0.07);
+  border-bottom: 0;
+}
+
+.result-list--dense .result-main {
+  align-self: center;
+}
+
+.result-list--dense .result-actions {
+  align-content: center;
+  border-top: 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.065);
+}
+
 .load-more {
   display: flex;
   width: min(100%, 320px);
@@ -1497,6 +1530,9 @@ progress::-moz-progress-bar {
 }
 
 .product-footer a {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
   flex: 0 0 auto;
   background: linear-gradient(90deg, var(--violet), var(--cyan), var(--fuchsia));
   background-clip: text;
@@ -1731,6 +1767,23 @@ progress::-moz-progress-bar {
   .result-row {
     max-width: 520px;
     margin-inline: auto;
+  }
+
+  .result-list--dense .result-row {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr auto;
+  }
+
+  .result-list--dense .result-preview {
+    min-height: 0;
+    aspect-ratio: 16 / 10;
+    border-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  }
+
+  .result-list--dense .result-actions {
+    border-top: 1px solid rgba(255, 255, 255, 0.065);
+    border-left: 0;
   }
 
   .product-footer {

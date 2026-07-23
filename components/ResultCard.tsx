@@ -80,7 +80,13 @@ export default function ResultCard({
       <div className="result-preview" aria-hidden="true">
         {previewUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={previewUrl} alt="" loading="lazy" />
+          <img
+            src={previewUrl}
+            alt=""
+            width={16}
+            height={10}
+            loading="lazy"
+          />
         ) : (
           <span>{item.format.toUpperCase()}</span>
         )}
