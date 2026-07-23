@@ -8,6 +8,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ImageWorkspaceApi } from "../../hooks/useImageWorkspace";
 import type { BatchItem } from "../../lib/batch/reducer";
+import type { SkippedInput } from "../../lib/batch/types";
 
 let workspace: ImageWorkspaceApi;
 
@@ -41,7 +42,10 @@ function queued(index: number): BatchItem {
   };
 }
 
-function createWorkspace(items: BatchItem[]): ImageWorkspaceApi {
+function createWorkspace(
+  items: BatchItem[],
+  skipped: SkippedInput[] = [],
+): ImageWorkspaceApi {
   return {
     batch: {
       state: {
@@ -70,8 +74,8 @@ function createWorkspace(items: BatchItem[]): ImageWorkspaceApi {
       reset: vi.fn(),
       retry: vi.fn(),
     },
-    selection: { archiveBase: "Raíz", accepted: items, skipped: [] },
-    skipped: [],
+    selection: { archiveBase: "Raíz", accepted: items, skipped },
+    skipped,
     archiveBase: "Raíz",
     archive: { kind: "idle", mode: null, progress: 0 },
     tiktokById: {},
@@ -190,5 +194,51 @@ describe("workbench page", () => {
     expect(
       screen.getByRole("button", { name: "Descargar carpeta TikTok" }),
     ).toBeEnabled();
+  });
+
+  it("keeps an accepted folder visible while its files enter the batch", () => {
+    const accepted = queued(1);
+    workspace = createWorkspace([]);
+    workspace.selection = {
+      archiveBase: "Raíz",
+      accepted: [accepted],
+      skipped: [],
+    };
+
+    render(<Home />);
+
+    expect(
+      screen.getByRole("heading", { name: "Lote inspeccionado" }),
+    ).toBeVisible();
+    expect(screen.getByText("Preparando 1 imagen…")).toBeVisible();
+    expect(screen.getByText("1 imagen preparándose")).toBeVisible();
+    expect(
+      screen.queryByText("0 listas, 0 con error, 0 omitidas"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", {
+        name: "Arrastra tus imágenes o una carpeta completa",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps an all-skipped folder visible with a compact explanation", () => {
+    workspace = createWorkspace([], [
+      {
+        relativePath: "Raíz/foto.webp",
+        reason: "Formato no soportado.",
+      },
+    ]);
+
+    const { container } = render(<Home />);
+
+    expect(
+      screen.getByText("No se encontraron imágenes JPEG o PNG válidas."),
+    ).toBeVisible();
+    const disclosure = container.querySelector("details.skipped-disclosure");
+    expect(disclosure).not.toHaveAttribute("open");
+    expect(
+      screen.getByText("1 archivo omitido", { exact: false }),
+    ).toBeVisible();
   });
 });

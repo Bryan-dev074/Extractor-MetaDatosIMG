@@ -7,6 +7,7 @@ import InteractiveBackground from "../components/InteractiveBackground";
 import ResultCard, {
   type TikTokItemState,
 } from "../components/ResultCard";
+import SkippedFilesDisclosure from "../components/SkippedFilesDisclosure";
 import SourcePicker from "../components/SourcePicker";
 import TikTokInfo from "../components/TikTokInfo";
 import { useImageWorkspace } from "../hooks/useImageWorkspace";
@@ -19,8 +20,18 @@ export default function Home() {
   const reduceMotion = useReducedMotion();
   const [visibleRows, setVisibleRows] = useState(INITIAL_ROWS);
   const hasMaterial =
-    workspace.batch.items.length > 0 || workspace.skipped.length > 0;
+    workspace.selection.accepted.length > 0 ||
+    workspace.batch.items.length > 0 ||
+    workspace.skipped.length > 0;
   const shownItems = workspace.batch.items.slice(0, visibleRows);
+  const pendingRegistrationCount =
+    workspace.batch.items.length === 0
+      ? workspace.selection.accepted.length
+      : 0;
+  const allSkipped =
+    workspace.batch.items.length === 0 &&
+    workspace.selection.accepted.length === 0 &&
+    workspace.skipped.length > 0;
 
   useEffect(() => {
     if (!hasMaterial) setVisibleRows(INITIAL_ROWS);
@@ -34,9 +45,16 @@ export default function Home() {
   const pauseAmbientMotion =
     liveCount > 0 || workspace.archive.kind === "running" || tiktokBusy;
   const resultSummary = useMemo(
-    () =>
-      `${workspace.batch.summary.completed} listas, ${workspace.batch.summary.failed} con error, ${workspace.skipped.length} omitidas`,
+    () => {
+      if (pendingRegistrationCount > 0) {
+        return `${pendingRegistrationCount} imagen${
+          pendingRegistrationCount === 1 ? "" : "es"
+        } preparándose`;
+      }
+      return `${workspace.batch.summary.completed} listas, ${workspace.batch.summary.failed} con error, ${workspace.skipped.length} omitidas`;
+    },
     [
+      pendingRegistrationCount,
       workspace.batch.summary.completed,
       workspace.batch.summary.failed,
       workspace.skipped.length,
@@ -143,31 +161,14 @@ export default function Home() {
                 />
               </aside>
 
-              {workspace.skipped.length > 0 ? (
-                <section className="skipped-panel" aria-labelledby="skipped-title">
-                  <div>
-                    <p className="eyebrow">Fuera del lote</p>
-                    <h2 id="skipped-title">
-                      {workspace.skipped.length} archivo
-                      {workspace.skipped.length === 1 ? "" : "s"} omitido
-                      {workspace.skipped.length === 1 ? "" : "s"}
-                    </h2>
-                  </div>
-                  <ul>
-                    {workspace.skipped.map((item, index) => (
-                      <li key={`${item.relativePath}-${index}`}>
-                        <code>{item.relativePath}</code>
-                        <span>{item.reason}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
-              ) : null}
+              <SkippedFilesDisclosure items={workspace.skipped} />
 
               <section
                 className="results-panel"
                 aria-labelledby="results-title"
-                aria-busy={liveCount > 0 || tiktokBusy}
+                aria-busy={
+                  liveCount > 0 || tiktokBusy || pendingRegistrationCount > 0
+                }
               >
                 <div className="results-panel__heading">
                   <div>
@@ -179,35 +180,61 @@ export default function Home() {
                   </p>
                 </div>
 
-                <div
-                  className={`result-list ${
-                    workspace.batch.items.length >= 4
-                      ? "result-list--dense"
-                      : "result-list--showcase"
-                  }`}
-                >
-                  {shownItems.map((item) => {
-                    const tiktok =
-                      (workspace.tiktokById[item.id] as TikTokItemState | undefined) ??
-                      IDLE_TIKTOK;
-                    return (
-                      <ResultCard
-                        key={item.id}
-                        item={item}
-                        previewUrl={workspace.previewUrls[item.id] ?? null}
-                        tiktok={tiktok}
-                        onPreviewVisibility={workspace.setPreviewVisible}
-                        onDownloadClean={workspace.downloadClean}
-                        onGenerateTikTok={workspace.generateTikTok}
-                        onDownloadTikTok={workspace.downloadTikTok}
-                        onDownloadTikTokPreview={workspace.downloadTikTokPreview}
-                        onCancelTikTok={workspace.cancelTikTok}
-                        onRetry={workspace.retry}
-                        onRemove={workspace.remove}
-                      />
-                    );
-                  })}
-                </div>
+                {shownItems.length > 0 ? (
+                  <div
+                    className={`result-list ${
+                      workspace.batch.items.length >= 4
+                        ? "result-list--dense"
+                        : "result-list--showcase"
+                    }`}
+                  >
+                    {shownItems.map((item) => {
+                      const tiktok =
+                        (workspace.tiktokById[item.id] as
+                          | TikTokItemState
+                          | undefined) ?? IDLE_TIKTOK;
+                      return (
+                        <ResultCard
+                          key={item.id}
+                          item={item}
+                          previewUrl={workspace.previewUrls[item.id] ?? null}
+                          tiktok={tiktok}
+                          onPreviewVisibility={workspace.setPreviewVisible}
+                          onDownloadClean={workspace.downloadClean}
+                          onGenerateTikTok={workspace.generateTikTok}
+                          onDownloadTikTok={workspace.downloadTikTok}
+                          onDownloadTikTokPreview={workspace.downloadTikTokPreview}
+                          onCancelTikTok={workspace.cancelTikTok}
+                          onRetry={workspace.retry}
+                          onRemove={workspace.remove}
+                        />
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="results-empty" role="status" aria-live="polite">
+                    {pendingRegistrationCount > 0 ? (
+                      <>
+                        <strong>
+                          Preparando {pendingRegistrationCount} imagen
+                          {pendingRegistrationCount === 1 ? "" : "es"}…
+                        </strong>
+                        <span>
+                          La selección permanece aquí mientras entra al procesador.
+                        </span>
+                      </>
+                    ) : allSkipped ? (
+                      <>
+                        <strong>
+                          No se encontraron imágenes JPEG o PNG válidas.
+                        </strong>
+                        <span>
+                          Abre “Archivos omitidos” para revisar cada motivo.
+                        </span>
+                      </>
+                    ) : null}
+                  </div>
+                )}
 
                 {visibleRows < workspace.batch.items.length ? (
                   <button

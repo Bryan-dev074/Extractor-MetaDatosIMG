@@ -43,3 +43,20 @@ describe("result-list visual contracts", () => {
     );
   });
 });
+
+describe("skipped-files disclosure visual contracts", () => {
+  it("keeps the summary touch-friendly and bounds the expanded list", () => {
+    expect(declarationBlock(".skipped-disclosure summary")).toMatch(
+      /min-height\s*:\s*44px/,
+    );
+    const list = declarationBlock(".skipped-disclosure__list");
+    expect(list).toMatch(/max-height\s*:/);
+    expect(list).toMatch(/overflow-y\s*:\s*auto/);
+    expect(declarationBlock(".skipped-disclosure code,\n.skipped-disclosure__reason")).toMatch(
+      /overflow-wrap\s*:\s*anywhere/,
+    );
+    expect(css).toMatch(
+      /@media\s*\(max-width:\s*760px\)[\s\S]*?\.skipped-disclosure__body\s*\{[^}]*padding-left\s*:\s*0/,
+    );
+  });
+});
