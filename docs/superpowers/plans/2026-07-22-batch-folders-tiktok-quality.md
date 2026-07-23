@@ -532,15 +532,20 @@ git commit -m "feat: preserve folder structure in ZIP downloads"
 **Files:**
 - Create: `lib/tiktok/anti-banding.ts`
 - Create: `lib/tiktok/export.ts`
+- Create: `lib/tiktok/png-color.ts`
+- Modify: `lib/batch/worker-pool.ts`
 - Modify: `workers/image-worker.ts`
 - Create: `tests/tiktok/anti-banding.test.ts`
 - Create: `tests/tiktok/export.test.ts`
+- Create: `tests/tiktok/png-color.test.ts`
+- Modify: `tests/batch/worker-pool.test.ts`
 - Add test fixture metadata only: `tests/fixtures/amazonian.json`
 
 **Interfaces:**
 - Produces: `createSmoothMask(image: ImageData): Uint8Array`
 - Produces: `applyAdaptiveDither(image: ImageData, seed: number): DitherResult`
 - Produces: `exportForTikTok(input: Blob, signal?: AbortSignal): Promise<TikTokExportResult>`
+- Extends the worker protocol with discriminated `clean` and `tiktok` requests/responses; TikTok uses a dedicated pool with concurrency `1`.
 
 - [ ] **Step 1: Write failing mask and bounded-dither tests**
 
@@ -558,11 +563,11 @@ it("changes only opaque low-detail pixels by at most one level", () => {
   }
 });
 
-it("is deterministic and approximately zero mean", () => {
+it("is deterministic and exactly zero mean", () => {
   const a = applyAdaptiveDither(gradient, 42);
   const b = applyAdaptiveDither(gradient, 42);
   expect(a.image.data).toEqual(b.image.data);
-  expect(Math.abs(a.meanDelta)).toBeLessThan(0.02);
+  expect(a.meanDelta).toBe(0);
 });
 ```
 
@@ -574,32 +579,42 @@ Expected: FAIL with missing TikTok modules.
 
 - [ ] **Step 3: Implement edge-safe mask and deterministic blue-noise dither**
 
-Compute integer luma as `(54 * r + 183 * g + 19 * b) >> 8`. Mark a non-border pixel eligible only when alpha is 255, maximum four-neighbor luma delta is at most 6, local 3x3 luma range is at most 12, and four-neighbor RGB/chroma deltas remain below the documented threshold so isoluminant color edges are excluded. Use a fixed 64x64 signed blue-noise ordering addressed with the content-derived seed, then pair eligible non-saturated channel samples into balanced `+1/-1` changes. Leave unmatched or saturated samples unchanged. `meanDelta` is computed over actual applied RGB deltas and must be exactly zero; preserve alpha.
+Compute integer luma as `(54 * r + 183 * g + 19 * b) >> 8`. Mark a non-border pixel eligible only when its complete 3x3 neighborhood is opaque, maximum four-neighbor luma delta is at most `6`, local 3x3 luma range is at most `12`, maximum four-neighbor RGB delta is at most `12`, and each `(R-G)`/`(B-G)` chroma delta is at most `8`, so isoluminant color edges are excluded. Validate positive integer dimensions, checked `width * height * 4`, exact data length, and a normalized uint32 seed; do not mutate the input.
+
+Use a fixed 64x64 blue-noise rank permutation addressed with the content-derived seed. The table must contain every rank `0..4095` exactly once, have a frozen checksum, and document that it was generated for this repository plus the generation method/license. Mix seed, tile coordinates, and channel to rotate, reflect, and offset the ordering so tile boundaries do not repeat visibly. Pair eligible non-saturated channel samples within each tile into balanced `+1/-1` changes without retaining image-wide index lists. Leave unmatched or saturated samples unchanged. `meanDelta` is computed over actual applied RGB deltas and must be exactly zero; preserve alpha and the input `colorSpace`.
 
 Tests additionally cover sparse and odd masks, saturated channels, border pixels, isoluminant color edges, and assert that a sufficiently large smooth gradient receives nonzero changes.
 
 - [ ] **Step 4: Implement native-size sRGB PNG and approximate preview**
 
-Decode with `createImageBitmap(blob, { imageOrientation: "from-image", colorSpaceConversion: "default" })`, use an sRGB 2D context when supported with a documented HTMLCanvasElement fallback, keep `bitmap.width`/`height`, and never upscale. Export PNG, remove conflicting `iCCP`/duplicate `sRGB` and inconsistent `gAMA`/`cHRM` chunks from the browser-encoded result, insert exactly one valid `sRGB` intent chunk before the first `IDAT`, and strictly reparse/CRC-check the final bytes. Generate the preview as JPEG quality `0.75` and label its `approximate` field `true`. Cancellation is checked between decode, canvas readback, PNG rewrite, and preview; active worker cancellation still terminates/replaces the worker per Task 4.
+Decode with `createImageBitmap(blob, { imageOrientation: "from-image", colorSpaceConversion: "default" })`, keep the oriented `bitmap.width`/`height`, never upscale, and reject decoded dimensions above the documented checked pixel limit. Use an sRGB `OffscreenCanvas` 2D context in a worker. If worker canvas APIs are absent or fail, repeat the TikTok export on the main thread through an `HTMLCanvasElement` adapter with concurrency `1`; this fallback cannot live inside the worker. Always close the bitmap in `finally` and check cancellation before and after each read, decode, readback, dither, encode, normalization, and preview stage.
+
+Treat the result as a static 8-bit RGB/RGBA PNG; explicitly reject APNG input. Normalize the browser-encoded PNG by removing all `iCCP`, `sRGB`, `gAMA`, `cHRM`, `cICP`, `mDCV`, `cLLI`, and `eXIf` chunks, then insert immediately after `IHDR` exactly one canonical sRGB declaration set: `cHRM` values `31270,32900,64000,33000,30000,60000,15000,6000`, `gAMA=45455`, and `sRGB` intent `0` (perceptual). Preserve `IDAT` bytes exactly during normalization, recompute CRCs for created chunks, and strictly validate signature, bounds, CRCs, critical chunks, ordering, contiguous `IDAT`, final `IEND`, expected dimensions, and the single canonical declaration. Generate the approximate preview as JPEG quality `0.75` with transparent pixels composited over explicit white, and label `approximate: true`.
+
+Extend `worker-pool.ts` and `image-worker.ts` with request/response unions discriminated by `{ kind, id, generation }`. Transfer exact-sized PNG and preview buffers. An application-level `ok:false` keeps the worker reusable; runtime error and active cancellation retain the replacement semantics from Task 4.
 
 - [ ] **Step 5: Add the Amazonian regression measurement**
 
-Store only dimensions, expected file hashes, crop coordinates, and threshold metrics in `amazonian.json`; do not commit the user's source image. The test reads a locally supplied fixture only when `AMAZONIAN_FIXTURE_DIR` is set, while the deterministic synthetic gradient remains mandatory in CI.
+Store only dimensions, expected file hashes, paired q100/q90 filenames, crop coordinates, and threshold metrics in `amazonian.json`; do not commit the user's source images. Synthetic algorithm, PNG normalization, export-adapter, and worker tests remain mandatory in CI. Use a fixed direct dev dependency capable of decoding/encoding JPEG in Node for this measurement rather than relying on jsdom canvas stubs.
+
+The local gate measures three JPEG-75 arms at 4:2:0: real q90 intermediate, direct q100, and q100 plus adaptive dither. It evaluates smooth-region equal-luma neighbor ratio, 8x8 boundary blockiness, frozen text-edge gradient retention, and eligible-pixel fraction. It must prove improvement against both the real q90 intermediate and direct q100 without losing more than 1% text-edge energy; calibrate and freeze the final thresholds only after the implemented blue-noise map is measured.
 
 Run:
 
 ```powershell
-$env:AMAZONIAN_FIXTURE_DIR='D:\ElaBela\POST\99 - Archivo\Versiones duplicadas\01 - Carruseles\9x16\Tarte Amazonian Clay'
+$env:AMAZONIAN_SOURCE_DIR='D:\ElaBela\POST\99 - Archivo\Versiones duplicadas\01 - Carruseles\9x16\Tarte Amazonian Clay'
+$env:AMAZONIAN_INTERMEDIATE_DIR='D:\ElaBela\POST\01 - Carruseles\9x16\Tarte - Amazonian Clay 16-Hour Foundation'
 npm test -- tests/tiktok
-Remove-Item Env:AMAZONIAN_FIXTURE_DIR
+Remove-Item Env:AMAZONIAN_SOURCE_DIR
+Remove-Item Env:AMAZONIAN_INTERMEDIATE_DIR
 ```
 
-Expected: deterministic tests pass and the local evidence test reports lower smooth-region block/banding metrics without reducing text-edge contrast beyond the specified 1% tolerance. This local Amazonian run is a mandatory release gate on the documented source hashes, not an optional skipped check.
+Expected: deterministic tests pass and the local evidence test reports lower smooth-region block/banding metrics versus both baselines without reducing text-edge contrast beyond the specified 1% tolerance. With neither environment variable the local evidence case may be omitted; when either variable is set, a missing pair, hash/dimension mismatch, or invalid crop must fail instead of skip. This local Amazonian run is a mandatory release gate on the documented source hashes.
 
 - [ ] **Step 6: Commit**
 
 ```powershell
-git add lib/tiktok workers/image-worker.ts tests/tiktok tests/fixtures/amazonian.json
+git add lib/tiktok lib/batch/worker-pool.ts workers/image-worker.ts tests/tiktok tests/batch/worker-pool.test.ts tests/fixtures/amazonian.json package.json package-lock.json
 git commit -m "feat: add adaptive TikTok Photo Max export"
 ```
 
