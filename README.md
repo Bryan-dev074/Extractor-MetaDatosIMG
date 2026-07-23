@@ -1,146 +1,75 @@
-# Extractor MetaData · Limpiador quirúrgico de metadatos de IA
+# Extractor MetaData IMG
 
-Aplicación web que elimina **únicamente los rastros que identifican una imagen como "generada por IA"** (manifiestos **C2PA / Content Credentials**, metadatos **XMP / EXIF / IPTC** de Midjourney, DALL·E, Adobe Firefly, Stable Diffusion, ComfyUI, Google Imagen / Gemini / **Nano Banana**, etc.) **conservando intacto el resto del archivo** — en especial el **perfil de color ICC**, la **resolución** y los **píxeles**.
+Aplicación local en el navegador para revisar y limpiar metadatos seleccionados de imágenes. Está pensada para conservar la calidad del archivo limpio y preparar una variante opcional para TikTok Photo Max.
 
-Todo el procesamiento ocurre **en el navegador (client-side)** mediante manipulación directa de los bytes de la imagen. Nada se sube a ningún servidor.
+## Qué admite y cómo decide
 
-> ⚡ Stack: **Next.js 15 (App Router)** · **Tailwind CSS** · **Framer Motion** · TypeScript. Listo para **Vercel**.
+- Solo acepta **JPEG y PNG**. El formato se identifica por sus *magic bytes*, no por la extensión; por eso una extensión falsa no engaña al procesador.
+- Rechaza entradas truncadas, ambiguas, malformadas o que superen los límites seguros. Un APNG válido puede limpiarse sin pérdida junto con sus chunks de animación; TikTok Photo Max lo rechaza porque su exportación es PNG estático.
+- El modo **Limpia** elimina las familias de metadatos de IA/procedencia que reconoce: manifiestos C2PA/JUMBF, XMP de procedencia, campos EXIF/IPTC y texto PNG asociados a generadores o flujos de IA. Conserva las estructuras y datos de imagen que no corresponden a esas firmas.
+- No promete detectar ni borrar toda posible señal de IA. Marcas de agua en los píxeles, como SynthID, no son metadatos y permanecen fuera de alcance.
 
----
+## Calidad y privacidad
 
-## ✨ Características
+En modo **Limpia** no hay recodificación: se conserva el payload de píxeles verificado, junto con las estructuras de color y dimensiones admitidas. Esto evita pérdida generacional, pero cada red social puede aplicar su propia compresión al publicar.
 
-- **Cirugía a nivel de bytes**: no se decodifica ni se recomprime la imagen. Los segmentos `DQT/DHT/SOF/SOS` (JPEG) y el chunk `IDAT` (PNG) se copian tal cual → **calidad idéntica al original, cero pérdida**.
-- **Detección amplia de IA**: C2PA (JUMBF), XMP de procedencia (IPTC `DigitalSourceType`), tags EXIF (`Software`, `MakerNote`, etc.), chunks de texto PNG (`parameters` de Stable Diffusion, `workflow` de ComfyUI…) y +40 firmas de generadores.
-- **Preservación de calidad**: mantiene **ICC**, **resolución/DPI**, **orientación EXIF** y dimensiones.
-- **Procesamiento por lotes**: arrastra **varias imágenes** a la vez; cada una se escanea en su propia tarjeta y puedes **descargar todo en un `.zip`**.
-- **Export opcional para TikTok**: botón que genera una copia recodificada a **1080p en sRGB** (ver más abajo por qué TikTok necesita esto).
-- **UI ultra-premium**: fondo interactivo (malla de nodos con parallax + ondas al hacer clic), efecto de **escáner láser** sobre cada imagen, micro-interacciones a 60fps y desglose de lo eliminado vs. lo preservado.
-- **Privacidad total**: 0 backend, 0 subida de archivos.
+Todo el análisis, limpieza, cola y creación de archivos ocurre en el navegador. Las imágenes no se envían a un servidor por esta aplicación.
 
----
+## Carpetas, lotes y ZIP
 
-## 🔬 ¿Qué se elimina y qué se conserva? (y por qué)
+Puedes elegir imágenes, una carpeta completa o arrastrar una carpeta con subcarpetas. La aplicación normaliza rutas relativas seguras, conserva el árbol al exportar y resuelve nombres duplicados de forma determinista.
 
-### Se ELIMINA (rastros de IA)
+- Cada lote puede descargarse como `-limpia.zip` o `-tiktok.zip`.
+- El ZIP incluye la estructura procesada y un reporte de procesamiento reproducible.
+- Cuando el navegador ofrece un escritor de archivos, solicita el destino antes de procesar el ZIP y escribe directamente. Si esa API no existe, usa una descarga Blob con una reserva de memoria conservadora.
+- Se valida el límite ZIP32 (cantidad de entradas, nombres y tamaños). Para archivos grandes, memoria limitada o un rechazo preventivo, procesa lotes más pequeños.
 
-| Formato | Dónde vive | Acción |
-|---|---|---|
-| JPEG | `APP11` (JUMBF) | **Manifiesto C2PA** → se elimina siempre |
-| JPEG | `APP1` (XMP) | Se elimina el paquete si contiene firmas de IA/procedencia |
-| JPEG | `APP1` (EXIF) | Se ponen a **cero solo los valores** de tags con IA (`Software`, `ImageDescription`, `MakerNote`, `UserComment`, `Artist`, `XP*`…). El resto de la estructura EXIF queda intacta |
-| JPEG | `APP13` (IPTC), `APPn`, `COM` | Se eliminan solo si contienen firmas de IA |
-| PNG | `caBX` / `caMs` / `caSt` | **Manifiesto C2PA** → se elimina siempre |
-| PNG | `tEXt` / `zTXt` / `iTXt` | Se eliminan si el keyword o el texto delatan IA (`parameters`, `prompt`, `workflow`, XMP de procedencia…) |
-| PNG | `eXIf` y chunks desconocidos | Se eliminan solo si contienen firmas de IA |
+Límites principales: **256 MiB por archivo** y presupuesto conservador para los bytes retenidos y para el ZIP Blob. No se intenta forzar una exportación que pueda agotar memoria.
 
-### Se CONSERVA (calidad para redes sociales)
+## TikTok Photo Max
 
-Tras investigar qué metadatos influyen en cómo se ve una imagen al subirla a redes, estos se mantienen **intactos**:
+TikTok puede recodificar las imágenes después de subirlas; ninguna herramienta puede garantizar cómo se verá la versión servida por TikTok. La opción **TikTok** crea una exportación independiente para darle una fuente más adecuada:
 
-- **Perfil de color ICC** (`APP2 ICC_PROFILE` en JPEG, chunk `iCCP`/`sRGB` en PNG). **Es lo más importante**: sin el perfil correcto, plataformas y navegadores "adivinan" el color y una imagen en Display P3 / Adobe RGB se ve **lavada o desaturada**. Conservarlo evita el cambio de color.
-- **Resolución / dimensiones de píxel** (`JFIF` density y EXIF `XResolution`; chunk `pHYs` en PNG). No se reescala nada.
-- **Orientación EXIF** (`tag 0x0112`). Si se borrara sin rotar los píxeles, la imagen podría salir **girada** en plataformas que respetan la orientación.
-- **`ColorSpace`, `YCbCrPositioning`, `gAMA`, `cHRM`, `sRGB`** y demás flags de color.
-- **Los píxeles**: al no recomprimir, no hay pérdida generacional ni "borroso".
+- mantiene las dimensiones nativas ya orientadas, sin ampliar la imagen;
+- crea un PNG estático en sRGB;
+- aplica cambios adaptativos de como máximo **±1** por canal solo en zonas opacas y suaves elegibles, con delta agregado exactamente cero;
+- entrega una vista previa JPEG aproximada con calidad 75 para inspección; la descarga de TikTok es siempre PNG.
 
-### Bonus de calidad: el C2PA pesa
+El modo TikTok modifica esos píxeles elegibles intencionalmente. Para la ruta sin cambios de píxeles, usa **Limpia**.
 
-Un manifiesto C2PA puede ocupar **decenas o cientos de KB**. Instagram aplica un **segundo pase de compresión** si el archivo supera ~1.5 MB; quitar el manifiesto **reduce el peso** y ayuda a evitar ese reprocesado agresivo que arruina la nitidez.
+## Desarrollo
 
-### 📱 TikTok baja la calidad (y no Instagram): por qué y qué hacer
-
-No son los metadatos. El **“Photo Mode” de TikTok recomprime cada imagen en su servidor apuntando a ~100 KB por foto** para que el carrusel cargue rápido en redes lentas — muchísimo más agresivo que Instagram (que permite ~1.5 MB y gestiona el color). Esa recompresión ocurre del lado de TikTok y **ninguna limpieza de metadatos la evita**.
-
-Lo único que ayuda es darle a TikTok el mejor origen posible:
-
-- Subir a **1080 × 1920 px (9:16)** exactos → TikTok se salta su reescalado (la principal causa del emborronado).
-- Usar **sRGB** → TikTok no gestiona bien perfiles de gama amplia (Display P3 / Adobe RGB) y los muestra apagados.
-- Partir de **alta calidad** → mejor origen, resultado más limpio tras su compresión obligatoria.
-
-Por eso cada imagen tiene un botón **“TikTok”** que genera justo eso: una copia recodificada a **1080p, sRGB y calidad ~92%**, lista para subir. (La descarga **“Limpia”** sigue siendo la versión **sin pérdida** para Instagram y demás.)
-
-### ⚠️ Limitación honesta: marcas de agua invisibles
-
-Las marcas de agua **a nivel de píxel** como **Google SynthID** (Imagen / Gemini / **Nano Banana**) **no son metadatos**: están incrustadas en los propios píxeles. Esta herramienta **no las toca**, porque eliminarlas implicaría alterar/recomprimir la imagen y degradar la calidad. Aquí se limpian los **metadatos**; el watermark de píxel queda fuera de alcance por diseño.
-
----
-
-## 🚀 Puesta en marcha local
-
-Requisitos: **Node.js ≥ 18.18**.
+Requiere Node.js **20.9 o superior**.
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
-Abre [http://localhost:3000](http://localhost:3000).
-
-Build de producción:
+Abre [http://localhost:3000](http://localhost:3000). Comandos disponibles:
 
 ```bash
+npm test
+npm run lint
+npx tsc --noEmit --incremental false
 npm run build
 npm run start
 ```
 
----
+## Estructura
 
-## ▲ Despliegue en Vercel
-
-1. Sube este repositorio a GitHub (ver abajo).
-2. En [vercel.com/new](https://vercel.com/new) importa el repo `Extractor-MetaDatosIMG`.
-3. Vercel detecta Next.js automáticamente — **no requiere configuración**. Pulsa **Deploy**.
-
-No hay variables de entorno ni backend: es una app puramente client-side.
-
----
-
-## ⬆️ Subir a tu repositorio de GitHub
-
-Desde la carpeta del proyecto:
-
-```bash
-git init
-git add .
-git commit -m "Extractor MetaData: limpiador quirúrgico de metadatos de IA"
-git branch -M main
-git remote add origin https://github.com/Bryan-dev074/Extractor-MetaDatosIMG.git
-git push -u origin main
+```text
+app/                 # App Router, metadatos y estilos globales
+components/          # Interfaz de selección, lotes y resultados
+hooks/               # Estado y coordinación del procesamiento
+lib/metadata/        # Validación y limpieza estricta JPEG/PNG
+lib/batch/           # Rutas, cola y workers cancelables
+lib/archive/         # Reporte y ZIP determinista
+lib/tiktok/          # PNG sRGB y ajuste adaptativo Photo Max
+workers/             # Worker de imágenes
+tests/               # Pruebas unitarias, integración y evidencia
 ```
 
-> Si el repositorio ya tenía commits y el push es rechazado, usa `git push -u origin main --force` (sobrescribe el remoto) **solo si estás seguro** de querer reemplazar su contenido.
+## Uso responsable
 
----
-
-## 🧱 Estructura del proyecto
-
-```
-app/
-  layout.tsx            # Metadata, fuentes, tema oscuro
-  page.tsx              # Orquesta el flujo (idle → escaneo → resultado)
-  globals.css           # Tailwind + utilidades (glass, gradientes, scrollbar)
-components/
-  InteractiveBackground.tsx  # Canvas: nodos + parallax + ondas al clic
-  Dropzone.tsx               # Drag & drop interactivo
-  ImagePreview.tsx           # Vista previa + escáner láser quirúrgico
-  MetadataReport.tsx         # Desglose eliminado vs. preservado
-  DownloadButton.tsx         # Botón con animación de éxito
-lib/
-  cleaner.ts            # Orquestador: detecta formato y limpia
-  jpeg.ts               # Parser/filtro de segmentos JPEG + cirugía EXIF
-  png.ts                # Parser/filtro de chunks PNG
-  signatures.ts         # +40 firmas de IA / C2PA / generadores
-  bytes.ts              # Utilidades binarias
-  types.ts              # Tipos compartidos
-```
-
----
-
-## ⚖️ Nota de uso
-
-Esta herramienta es un limpiador de metadatos de propósito general (privacidad y compatibilidad). Úsala de forma responsable y respeta las políticas de divulgación de contenido de IA de cada plataforma y la legislación aplicable.
-
----
-
-Hecho con Next.js. 100% client-side.
+Esta aplicación es una herramienta de privacidad y compatibilidad de archivos. Respeta las reglas de divulgación de contenido y las políticas de cada plataforma.

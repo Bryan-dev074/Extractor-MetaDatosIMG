@@ -23,7 +23,7 @@ const jetbrainsMono = JetBrains_Mono({
 export const metadata: Metadata = {
   title: "Extractor MetaData · Limpiador quirúrgico de metadatos de IA",
   description:
-    "Elimina rastros de IA de imágenes JPEG y PNG sin recomprimir, procesa carpetas completas y prepara copias PNG sRGB para TikTok.",
+    "Limpia metadatos seleccionados de JPEG y PNG sin recomprimir; procesa carpetas y crea copias PNG sRGB adaptativas para TikTok.",
   keywords: [
     "metadatos",
     "C2PA",
@@ -40,7 +40,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "Extractor MetaData · Limpiador quirúrgico de metadatos de IA",
     description:
-      "Quita etiquetas de IA preservando píxeles, perfil de color, resolución y estructura de carpetas.",
+      "El modo limpio conserva los píxeles; el modo TikTok genera una copia PNG sRGB con ajustes adaptativos acotados.",
     type: "website",
   },
 };
