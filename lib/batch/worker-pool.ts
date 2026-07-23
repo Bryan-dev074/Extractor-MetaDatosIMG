@@ -57,6 +57,7 @@ export interface ImageWorkerPool {
 interface ActiveRequest {
   finished: boolean;
   destroy: () => void;
+  fail: (error: unknown) => void;
 }
 
 interface WaitingRequest {
@@ -71,6 +72,11 @@ interface WaitingRequest {
 interface WorkerSlot {
   worker: ImageWorker | null;
   active: ActiveRequest | null;
+  runtimeListeners: {
+    worker: ImageWorker;
+    onError: EventListener;
+    onMessageError: EventListener;
+  } | null;
 }
 
 function abortError(reason?: unknown): DOMException {
@@ -117,7 +123,7 @@ export function createImageWorkerPool(
   const slots: WorkerSlot[] = [];
   try {
     for (let index = 0; index < size; index += 1) {
-      slots.push({ worker: createWorker(), active: null });
+      slots.push({ worker: createWorker(), active: null, runtimeListeners: null });
     }
   } catch (error) {
     for (const slot of slots) slot.worker?.terminate();
@@ -151,19 +157,64 @@ export function createImageWorkerPool(
   const liveWorkerCount = (): number =>
     slots.reduce((count, slot) => count + (slot.worker ? 1 : 0), 0);
 
+  let drainWaiting: () => void;
+  let handleSlotRuntimeFailure: (
+    slot: WorkerSlot,
+    worker: ImageWorker,
+    error: Error,
+  ) => void;
+
+  const removeRuntimeListeners = (slot: WorkerSlot, worker: ImageWorker): void => {
+    const listeners = slot.runtimeListeners;
+    if (!listeners || listeners.worker !== worker) return;
+    worker.removeEventListener("error", listeners.onError);
+    worker.removeEventListener("messageerror", listeners.onMessageError);
+    slot.runtimeListeners = null;
+  };
+
+  const attachWorker = (slot: WorkerSlot, worker: ImageWorker): void => {
+    const onError: EventListener = (event) => {
+      handleSlotRuntimeFailure(slot, worker, eventError(event));
+    };
+    const onMessageError: EventListener = () => {
+      handleSlotRuntimeFailure(
+        slot,
+        worker,
+        new Error("No se pudo decodificar la respuesta del worker."),
+      );
+    };
+    slot.worker = worker;
+    slot.runtimeListeners = { worker, onError, onMessageError };
+    worker.addEventListener("error", onError);
+    worker.addEventListener("messageerror", onMessageError);
+  };
+
+  const replaceSlotWorker = (slot: WorkerSlot, worker: ImageWorker): void => {
+    if (slot.worker !== worker) return;
+    removeRuntimeListeners(slot, worker);
+    slot.worker = null;
+    worker.terminate();
+    if (terminal) return;
+    try {
+      attachWorker(slot, createWorker());
+    } catch {
+      slot.worker = null;
+      slot.runtimeListeners = null;
+    }
+  };
+
   const recreateDeadSlots = (): boolean => {
     for (const slot of slots) {
       if (terminal || slot.worker || slot.active) continue;
       try {
-        slot.worker = createWorker();
+        attachWorker(slot, createWorker());
       } catch {
         slot.worker = null;
+        slot.runtimeListeners = null;
       }
     }
     return liveWorkerCount() > 0;
   };
-
-  let drainWaiting: () => void;
 
   const start = (slot: WorkerSlot, entry: WaitingRequest): void => {
     const assignedWorker = slot.worker;
@@ -174,8 +225,6 @@ export function createImageWorkerPool(
 
     const cleanup = (): void => {
       assignedWorker.removeEventListener("message", onMessage);
-      assignedWorker.removeEventListener("error", onError);
-      assignedWorker.removeEventListener("messageerror", onMessageError);
       entry.signal?.removeEventListener("abort", onAbort);
     };
 
@@ -187,17 +236,7 @@ export function createImageWorkerPool(
       active.finished = true;
       cleanup();
 
-      if (replaceWorker && slot.worker === assignedWorker) {
-        assignedWorker.terminate();
-        slot.worker = null;
-        if (!terminal) {
-          try {
-            slot.worker = createWorker();
-          } catch {
-            slot.worker = null;
-          }
-        }
-      }
+      if (replaceWorker) replaceSlotWorker(slot, assignedWorker);
       if (slot.active === active) slot.active = null;
       settleWaiting(entry, outcome);
       drainWaiting();
@@ -218,16 +257,6 @@ export function createImageWorkerPool(
       else finish({ error: new Error(message.error) }, false);
     };
 
-    const onError: EventListener = (event) => {
-      if (slot.worker !== assignedWorker || slot.active !== active) return;
-      finish({ error: eventError(event) }, true);
-    };
-
-    const onMessageError: EventListener = () => {
-      if (slot.worker !== assignedWorker || slot.active !== active) return;
-      finish({ error: new Error("No se pudo decodificar la respuesta del worker.") }, true);
-    };
-
     const onAbort = (): void => {
       if (slot.worker !== assignedWorker || slot.active !== active) return;
       finish({ error: abortError(entry.signal?.reason) }, true);
@@ -236,11 +265,10 @@ export function createImageWorkerPool(
     const active: ActiveRequest = {
       finished: false,
       destroy: () => finish({ error: abortError("El pool fue destruido.") }, false),
+      fail: (error) => finish({ error }, true),
     };
     slot.active = active;
     assignedWorker.addEventListener("message", onMessage);
-    assignedWorker.addEventListener("error", onError);
-    assignedWorker.addEventListener("messageerror", onMessageError);
     entry.signal?.addEventListener("abort", onAbort, { once: true });
 
     try {
@@ -248,6 +276,20 @@ export function createImageWorkerPool(
     } catch (error) {
       finish({ error }, true);
     }
+  };
+
+  handleSlotRuntimeFailure = (
+    slot: WorkerSlot,
+    worker: ImageWorker,
+    error: Error,
+  ): void => {
+    if (terminal || slot.worker !== worker) return;
+    if (slot.active) {
+      slot.active.fail(error);
+      return;
+    }
+    replaceSlotWorker(slot, worker);
+    drainWaiting();
   };
 
   drainWaiting = (): void => {
@@ -281,6 +323,10 @@ export function createImageWorkerPool(
       draining = false;
     }
   };
+
+  for (const slot of slots) {
+    if (slot.worker) attachWorker(slot, slot.worker);
+  }
 
   const execute = (request: WorkerRequest, signal?: AbortSignal): Promise<CleanResult> => {
     if (terminal) return Promise.reject(new Error("El pool de workers fue destruido."));
@@ -322,9 +368,14 @@ export function createImageWorkerPool(
       rejectAllWaiting(abortError("El pool fue destruido."));
       for (const slot of slots) {
         slot.active?.destroy();
-        slot.worker?.terminate();
+        const worker = slot.worker;
+        if (worker) {
+          removeRuntimeListeners(slot, worker);
+          worker.terminate();
+        }
         slot.worker = null;
         slot.active = null;
+        slot.runtimeListeners = null;
       }
     },
   };

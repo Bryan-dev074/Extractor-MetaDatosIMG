@@ -211,6 +211,100 @@ describe("createImageWorkerPool", () => {
     await expect(next).resolves.toMatchObject({ cleanedSize: 2 });
   });
 
+  it.each(["error", "messageerror"] as const)(
+    "retires an idle worker after a runtime %s and uses exactly one replacement",
+    async (eventType) => {
+      const factory = workerFactory();
+      const pool = createImageWorkerPool({ size: 1, createWorker: factory.createWorker });
+      const retired = factory.workers[0];
+
+      if (eventType === "error") retired.emitError("idle roto");
+      else retired.emitMessageError();
+      retired.emitError("evento tardío duplicado");
+
+      expect(retired.terminate).toHaveBeenCalledOnce();
+      expect(retired.listenerCount("error")).toBe(0);
+      expect(retired.listenerCount("messageerror")).toBe(0);
+      expect(factory.workers).toHaveLength(2);
+      const replacement = factory.workers[1];
+      const next = pool.clean(request("next"));
+      expect(retired.posted).toHaveLength(0);
+      expect(replacement.posted[0].message.id).toBe("next");
+
+      replacement.emitMessage(success(replacement.posted[0].message));
+      await expect(next).resolves.toMatchObject({ cleanedSize: 2 });
+    },
+  );
+
+  it("waits for a healthy busy slot after an idle slot dies and replacement fails", async () => {
+    const workers: FakeWorker[] = [];
+    let factoryCalls = 0;
+    const createWorker = () => {
+      factoryCalls += 1;
+      if (factoryCalls > 2) throw new Error("reemplazo bloqueado");
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    };
+    const pool = createImageWorkerPool({ size: 2, createWorker });
+    const active = pool.clean(request("active"));
+    const retiredIdle = workers[1];
+
+    retiredIdle.emitError("idle muerto");
+    const waiting = pool.clean(request("waiting"));
+    let waitingSettled = false;
+    void waiting.then(
+      () => {
+        waitingSettled = true;
+      },
+      () => {
+        waitingSettled = true;
+      },
+    );
+    await Promise.resolve();
+
+    expect(retiredIdle.terminate).toHaveBeenCalledOnce();
+    expect(retiredIdle.posted).toHaveLength(0);
+    expect(waitingSettled).toBe(false);
+    workers[0].emitMessage(success(workers[0].posted[0].message));
+    await expect(active).resolves.toMatchObject({ cleanedSize: 2 });
+    expect(workers[0].posted[1].message.id).toBe("waiting");
+
+    workers[0].emitMessage(success(workers[0].posted[1].message));
+    await expect(waiting).resolves.toMatchObject({ cleanedSize: 2 });
+  });
+
+  it("rejects later work clearly when the only idle worker dies without replacement", async () => {
+    const workers: FakeWorker[] = [];
+    let factoryCalls = 0;
+    const createWorker = () => {
+      factoryCalls += 1;
+      if (factoryCalls > 1) throw new Error("sin reemplazo");
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    };
+    const pool = createImageWorkerPool({ size: 1, createWorker });
+
+    workers[0].emitMessageError();
+
+    expect(workers[0].terminate).toHaveBeenCalledOnce();
+    await expect(pool.clean(request("later"))).rejects.toThrow(/ning[uú]n worker activo/i);
+  });
+
+  it("does not recreate an idle worker after the pool is destroyed", () => {
+    const factory = workerFactory();
+    const pool = createImageWorkerPool({ size: 1, createWorker: factory.createWorker });
+    const retired = factory.workers[0];
+
+    pool.destroy();
+    retired.emitError("después de destroy");
+    retired.emitMessageError();
+
+    expect(factory.workers).toHaveLength(1);
+    expect(retired.terminate).toHaveBeenCalledOnce();
+  });
+
   it("rejects waiters clearly when no live worker can be recreated", async () => {
     const workers: FakeWorker[] = [];
     let factoryCalls = 0;

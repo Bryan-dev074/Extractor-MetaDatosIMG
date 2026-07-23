@@ -183,6 +183,10 @@ export function createTaskQueue<T, R>({
     cancel(key, reason) {
       const entry = keyed.get(key);
       if (!entry || entry.status === "settled") return false;
+      if (entry.status === "queued") {
+        const index = queued.indexOf(entry);
+        if (index >= 0) queued.splice(index, 1);
+      }
       cancelEntry(entry, reason);
       return true;
     },

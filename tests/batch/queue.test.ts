@@ -135,6 +135,65 @@ describe("createTaskQueue", () => {
     expect(oldSettlements).toBe(1);
   });
 
+  it("physically releases a cancelled queued value before the active runner settles", async () => {
+    const gate = deferred();
+    const activeValue = { id: "active" };
+    const replacementValue = { id: "replacement" };
+    const queue = createTaskQueue<{ id: string }, string>({
+      concurrency: 1,
+      run: async (value) => {
+        if (value === activeValue) await gate.promise;
+        return value.id;
+      },
+    });
+    const active = queue.add(activeValue, { key: "active" });
+    const cancelledValues = new Set<{ id: string }>();
+    for (let index = 0; index < 16; index += 1) {
+      const cancelledValue = { id: `cancelled-${index}` };
+      cancelledValues.add(cancelledValue);
+      const cancelled = queue.add(cancelledValue, { key: "same" });
+      expect(queue.cancel("same")).toBe(true);
+      await expect(cancelled).rejects.toMatchObject({ name: "AbortError" });
+    }
+    const replacement = queue.add(replacementValue, { key: "same" });
+    let observedRetainedValue = false;
+    const originalShift = Array.prototype.shift;
+    Object.defineProperty(Array.prototype, "shift", {
+      configurable: true,
+      writable: true,
+      value: function (this: unknown[]) {
+        if (
+          this.some(
+            (candidate) =>
+              typeof candidate === "object" &&
+              candidate !== null &&
+              "value" in candidate &&
+              cancelledValues.has(candidate.value as { id: string }),
+          )
+        ) {
+          observedRetainedValue = true;
+        }
+        return Reflect.apply(originalShift, this, []);
+      },
+    });
+
+    try {
+      gate.resolve();
+      await expect(active).resolves.toBe("active");
+      await expect(replacement).resolves.toBe("replacement");
+    } finally {
+      Object.defineProperty(Array.prototype, "shift", {
+        configurable: true,
+        writable: true,
+        value: originalShift,
+      });
+    }
+
+    expect(observedRetainedValue).toBe(false);
+    expect(queue.pending).toBe(0);
+    expect(queue.running).toBe(0);
+  });
+
   it("settles cancelAll immediately and permits the same key while the old slot drains", async () => {
     const gate = deferred();
     const starts: string[] = [];
