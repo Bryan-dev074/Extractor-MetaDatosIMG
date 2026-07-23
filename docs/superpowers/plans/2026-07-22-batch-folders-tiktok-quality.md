@@ -623,6 +623,7 @@ git commit -m "feat: add adaptive TikTok Photo Max export"
 ### Task 7: Batch UI Integration
 
 **Files:**
+- Create: `hooks/useImageWorkspace.ts`
 - Create: `components/SourcePicker.tsx`
 - Create: `components/BatchToolbar.tsx`
 - Modify: `components/Dropzone.tsx`
@@ -630,11 +631,14 @@ git commit -m "feat: add adaptive TikTok Photo Max export"
 - Modify: `components/TikTokInfo.tsx`
 - Modify: `app/page.tsx`
 - Modify: `app/globals.css`
+- Modify: `app/layout.tsx`
+- Delete: `lib/optimize.ts`
+- Create: `tests/ui/use-image-workspace.test.tsx`
 - Create: `tests/ui/source-picker.test.tsx`
 - Create: `tests/ui/batch-toolbar.test.tsx`
 
 **Interfaces:**
-- Consumes: `BatchProcessorApi`, archive functions, and TikTok exporter.
+- Consumes: `BatchProcessorApi`, archive functions, and TikTok exporter through a single `useImageWorkspace` coordinator.
 - Produces: accessible file/folder controls, progress UI, cancellation, retry, clean ZIP, and TikTok ZIP actions.
 
 - [ ] **Step 1: Add failing UI behavior tests**
@@ -660,9 +664,9 @@ Expected: FAIL with missing components.
 
 - [ ] **Step 3: Implement source selection and reducer-driven page composition**
 
-`app/page.tsx` must not parse bytes or build ZIP paths. It wires `SourcePicker`, `BatchToolbar`, summary, and cards to `useBatchProcessor` only.
+`app/page.tsx` must not parse bytes, build ZIP paths, operate canvas, or eagerly create object URLs. It wires `SourcePicker`, `BatchToolbar`, summaries, output rails, and cards to `useImageWorkspace`, which composes the already-hardened `useBatchProcessor` with selection/skipped state, clean/TikTok archive jobs, per-item TikTok state, and object-URL cleanup.
 
-Source selection awaits the magic-byte `InputSelection`, displays skipped entries before processing, and enforces the retained-byte preflight. A clean ZIP click acquires the optional direct writer immediately inside the click handler, then passes it into asynchronous archive planning/generation; picker cancellation leaves the UI idle and usable.
+Source selection awaits the magic-byte `InputSelection`, displays skipped entries before processing, and enforces the retained-byte preflight. Merge later selections deterministically; preserve one common root or fall back to `imagenes-procesadas` for multiple roots. A clean ZIP click calls `requestArchiveWriter` synchronously before its first `await`, import, planning step, or state transition, then passes the result into asynchronous archive planning/generation. Only `unsupported` uses Blob fallback; picker cancellation leaves the UI idle and usable.
 
 Set the folder input property through its DOM ref to avoid relying on a non-standard JSX type:
 
@@ -674,7 +678,11 @@ useEffect(() => {
 
 - [ ] **Step 4: Implement lazy previews and explicit TikTok states**
 
-Create preview URLs only after an IntersectionObserver marks a card visible. Revoke them on invisibility/removal/reset. The TikTok button labels output as `PNG sRGB · anti-parches adaptativo`; clean output labels `Sin recomprimir`.
+Create preview URLs only after an IntersectionObserver marks a result within roughly 250px of the viewport. Revoke them on invisibility/removal/reset/unmount. Bound initial rendering to roughly 60 dense path-led result rows with explicit load-more and `content-visibility: auto`, rather than an equal-card grid. The TikTok button labels output as `PNG sRGB · anti-parches adaptativo`; clean output labels `Píxeles 1:1 · sin recomprimir`. TikTok batch generation is explicit and sequential.
+
+Replace the old marketing hero, glassmorphism/auroras, continuous canvas, and decorative gradients with a dark prepress workbench: quiet layered surfaces, monospace path/byte proof, proof green only for verified lossless output, scan cyan for progress, and rose only for the TikTok output rail. Remove every `lib/optimize.ts` consumer and the legacy fixed-size JPEG claims.
+
+Add a skip link, semantic `<progress>` plus visible tabular counts, `aria-live` summaries, actionable `role="alert"` errors, complete accessible names, visible focus, 44px targets, deep-path wrapping, reduced-motion behavior, and retained actions at 360x800/390x844 and 200% zoom.
 
 - [ ] **Step 5: Verify UI GREEN and browser build**
 
@@ -688,12 +696,12 @@ npx tsc --noEmit --incremental false
 npm run build
 ```
 
-Expected: all commands exit 0 and the production route remains static.
+Expected: all commands exit 0 and the production route remains static. Browser verification covers desktop, 1024px, 390x844, 360x800, keyboard-only, reduced motion, 200% zoom, direct writer, Blob fallback, recursive drop, cancellation/retry, long Unicode paths, lazy previews, and no console errors.
 
 - [ ] **Step 6: Commit**
 
 ```powershell
-git add app components hooks tests/ui
+git add app components hooks lib/optimize.ts tests/ui
 git commit -m "feat: add folder batch and TikTok Max interface"
 ```
 
