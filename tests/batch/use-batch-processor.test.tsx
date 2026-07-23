@@ -212,6 +212,79 @@ describe("useBatchProcessor", () => {
     expect(result.current.state.itemsById.a.status).toBe("cancelled");
   });
 
+  it("starts the same keyed item while its cancelled reader is still draining", async () => {
+    const factory = workerFactory();
+    const oldRead = deferred<ArrayBuffer>();
+    const old = makeInput("same", () => oldRead.promise);
+    const replacement = makeInput("same");
+    const { result } = renderHook(() =>
+      useBatchProcessor({ createWorker: factory.createWorker, workerPoolSize: 1 }),
+    );
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    act(() => result.current.start([old]));
+    await waitFor(() => expect(old.read).toHaveBeenCalledOnce());
+
+    act(() => result.current.start([replacement]));
+    expect(result.current.state.itemsById.same.status).toBe("queued");
+    expect(replacement.read).not.toHaveBeenCalled();
+    const bytes = jpegWithComment("Created by AI old").bytes;
+    oldRead.resolve(
+      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+    );
+
+    await waitFor(() => expect(replacement.read).toHaveBeenCalledOnce());
+    await waitFor(() => expect(factory.workers[0].posted).toHaveLength(1));
+    act(() => succeed(factory.workers[0]));
+    await waitFor(() => expect(result.current.state.itemsById.same.status).toBe("completed"));
+  });
+
+  it("retries a cancelled key before its old reader settles", async () => {
+    const factory = workerFactory();
+    const firstRead = deferred<ArrayBuffer>();
+    const bytes = jpegWithComment("Created by AI retry").bytes;
+    const freshBuffer = () =>
+      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    let readCount = 0;
+    const item = makeInput("retry", () => {
+      readCount += 1;
+      return readCount === 1 ? firstRead.promise : Promise.resolve(freshBuffer());
+    });
+    const { result } = renderHook(() =>
+      useBatchProcessor({ createWorker: factory.createWorker, workerPoolSize: 1 }),
+    );
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    act(() => result.current.start([item]));
+    await waitFor(() => expect(item.read).toHaveBeenCalledOnce());
+
+    act(() => result.current.cancel());
+    expect(result.current.state.itemsById.retry.status).toBe("cancelled");
+    act(() => result.current.retry("retry"));
+    expect(result.current.state.itemsById.retry.status).toBe("queued");
+    firstRead.resolve(freshBuffer());
+
+    await waitFor(() => expect(item.read).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(factory.workers[0].posted).toHaveLength(1));
+    act(() => succeed(factory.workers[0]));
+    await waitFor(() => expect(result.current.state.itemsById.retry.status).toBe("completed"));
+  });
+
+  it("treats an un-aborted file AbortError as an item failure", async () => {
+    const factory = workerFactory();
+    const item = makeInput("read-error", async () => {
+      throw new DOMException("lectura interrumpida", "AbortError");
+    });
+    const { result } = renderHook(() =>
+      useBatchProcessor({ createWorker: factory.createWorker, workerPoolSize: 1 }),
+    );
+    await waitFor(() => expect(result.current.ready).toBe(true));
+
+    act(() => result.current.start([item]));
+
+    await waitFor(() => expect(result.current.state.itemsById["read-error"].status).toBe("error"));
+    expect(result.current.state.itemsById["read-error"].error).toBe("lectura interrumpida");
+    expect(factory.workers[0].posted).toHaveLength(0);
+  });
+
   it("resets to an empty newer generation with no late dispatch", async () => {
     const factory = workerFactory();
     const item = makeInput("a");

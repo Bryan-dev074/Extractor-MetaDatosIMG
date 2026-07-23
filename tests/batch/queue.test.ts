@@ -56,7 +56,7 @@ describe("createTaskQueue", () => {
     await expect(first).resolves.toBe("first");
   });
 
-  it("keeps an actively cancelled task in its slot until the runner settles", async () => {
+  it("rejects active cancellation immediately, releases its key, and retains the slot", async () => {
     const activeGate = deferred();
     const signals = new Map<string, AbortSignal>();
     const starts: string[] = [];
@@ -70,18 +70,115 @@ describe("createTaskQueue", () => {
       },
     });
     const active = queue.add("active", { key: "active" });
-    const next = queue.add("next", { key: "next" });
+    let activeSettled = false;
+    void active.then(
+      () => {
+        activeSettled = true;
+      },
+      () => {
+        activeSettled = true;
+      },
+    );
 
     expect(queue.cancel("active")).toBe(true);
+    await Promise.resolve();
+    expect(activeSettled).toBe(true);
     expect(signals.get("active")?.aborted).toBe(true);
+    expect(active.signal.aborted).toBe(true);
+    const replacement = queue.add("replacement", { key: "active" });
     expect(queue.running).toBe(1);
     expect(queue.pending).toBe(1);
     expect(starts).toEqual(["active"]);
 
     activeGate.resolve();
     await expect(active).rejects.toMatchObject({ name: "AbortError" });
-    await expect(next).resolves.toBe("next");
-    expect(starts).toEqual(["active", "next"]);
+    await expect(replacement).resolves.toBe("replacement");
+    expect(starts).toEqual(["active", "replacement"]);
+  });
+
+  it("keeps a replacement key owned when the cancelled runner settles late", async () => {
+    const oldGate = deferred<string>();
+    const replacementGate = deferred<string>();
+    const starts: string[] = [];
+    const queue = createTaskQueue<string, string>({
+      concurrency: 1,
+      run: async (value) => {
+        starts.push(value);
+        return value === "old" ? oldGate.promise : replacementGate.promise;
+      },
+    });
+    const old = queue.add("old", { key: "same" });
+    let oldSettlements = 0;
+    void old.then(
+      () => {
+        oldSettlements += 1;
+      },
+      () => {
+        oldSettlements += 1;
+      },
+    );
+
+    expect(queue.cancel("same")).toBe(true);
+    const replacement = queue.add("replacement", { key: "same" });
+    oldGate.reject(new Error("fallo tardío retirado"));
+
+    await expect(old).rejects.toMatchObject({ name: "AbortError" });
+    await vi.waitFor(() => expect(starts).toEqual(["old", "replacement"]));
+    expect(oldSettlements).toBe(1);
+    expect(queue.cancel("same")).toBe(true);
+    await expect(replacement).rejects.toMatchObject({ name: "AbortError" });
+    expect(queue.cancel("same")).toBe(false);
+    expect(queue.running).toBe(1);
+
+    replacementGate.resolve("replacement");
+    await vi.waitFor(() => expect(queue.running).toBe(0));
+    expect(oldSettlements).toBe(1);
+  });
+
+  it("settles cancelAll immediately and permits the same key while the old slot drains", async () => {
+    const gate = deferred();
+    const starts: string[] = [];
+    const queue = createTaskQueue<string, string>({
+      concurrency: 1,
+      run: async (value) => {
+        starts.push(value);
+        if (value === "old") await gate.promise;
+        return value;
+      },
+    });
+    const old = queue.add("old", { key: "same" });
+
+    queue.cancelAll();
+    await expect(old).rejects.toMatchObject({ name: "AbortError" });
+    const next = queue.add("new", { key: "same" });
+    expect(queue.running).toBe(1);
+    expect(queue.pending).toBe(1);
+    expect(starts).toEqual(["old"]);
+
+    gate.resolve();
+    await expect(next).resolves.toBe("new");
+    expect(starts).toEqual(["old", "new"]);
+  });
+
+  it("settles active work immediately on terminal dispose but retains occupancy", async () => {
+    const gate = deferred();
+    const queue = createTaskQueue({
+      concurrency: 1,
+      run: async () => {
+        await gate.promise;
+        return "done";
+      },
+    });
+    const active = queue.add("active", { key: "active" });
+
+    queue.dispose();
+
+    await expect(active).rejects.toMatchObject({ name: "AbortError" });
+    expect(queue.running).toBe(1);
+    expect(queue.disposed).toBe(true);
+    await expect(queue.add("late", { key: "active" })).rejects.toThrow(/eliminada/i);
+    gate.resolve();
+    await vi.waitFor(() => expect(queue.running).toBe(0));
   });
 
   it("rejects duplicate explicit keys while allowing tasks without keys", async () => {

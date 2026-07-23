@@ -113,7 +113,18 @@ describe("createImageWorkerPool", () => {
     expect(factory.workers).toHaveLength(2);
     const first = pool.clean(request("a", 1, firstBuffer));
     const second = pool.clean(request("b", 1, secondBuffer));
-    await expect(pool.clean(request("c"))).rejects.toThrow(/disponible/i);
+    const third = pool.clean(request("c"));
+    let thirdSettled = false;
+    void third.then(
+      () => {
+        thirdSettled = true;
+      },
+      () => {
+        thirdSettled = true;
+      },
+    );
+    await Promise.resolve();
+    expect(thirdSettled).toBe(false);
 
     expect(factory.workers[0].posted[0]).toEqual({
       message: request("a", 1, firstBuffer),
@@ -121,10 +132,118 @@ describe("createImageWorkerPool", () => {
     });
     expect(factory.workers[1].posted[0].transfer).toEqual([secondBuffer]);
     factory.workers[0].emitMessage(success(factory.workers[0].posted[0].message));
+    expect(factory.workers[0].posted[1].message.id).toBe("c");
+    factory.workers[0].emitMessage(success(factory.workers[0].posted[1].message));
     factory.workers[1].emitMessage(success(factory.workers[1].posted[0].message));
 
-    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    await expect(Promise.all([first, second, third])).resolves.toHaveLength(3);
     expect(pool.running).toBe(0);
+  });
+
+  it("uses a healthy busy slot after another slot cannot be replaced", async () => {
+    const workers: FakeWorker[] = [];
+    let factoryCalls = 0;
+    const createWorker = () => {
+      factoryCalls += 1;
+      if (factoryCalls > 2) throw new Error("reemplazo bloqueado");
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    };
+    const pool = createImageWorkerPool({ size: 2, createWorker });
+    const failed = pool.clean(request("failed"));
+    const healthy = pool.clean(request("healthy"));
+
+    workers[0].emitError("boom");
+    await expect(failed).rejects.toThrow("boom");
+    const waiting = pool.clean(request("waiting"));
+    let waitingSettled = false;
+    void waiting.then(
+      () => {
+        waitingSettled = true;
+      },
+      () => {
+        waitingSettled = true;
+      },
+    );
+    await Promise.resolve();
+    expect(waitingSettled).toBe(false);
+    expect(workers[1].posted).toHaveLength(1);
+
+    workers[1].emitMessage(success(workers[1].posted[0].message));
+    await expect(healthy).resolves.toMatchObject({ cleanedSize: 2 });
+    expect(workers[1].posted[1].message.id).toBe("waiting");
+    workers[1].emitMessage(success(workers[1].posted[1].message));
+    await expect(waiting).resolves.toMatchObject({ cleanedSize: 2 });
+  });
+
+  it("allows an abort while waiting for a live busy worker", async () => {
+    const factory = workerFactory();
+    const pool = createImageWorkerPool({ size: 1, createWorker: factory.createWorker });
+    const active = pool.clean(request("active"));
+    const controller = new AbortController();
+    const waiting = pool.clean(request("waiting"), controller.signal);
+
+    controller.abort("ya no se necesita");
+
+    await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+    expect(factory.workers[0].posted).toHaveLength(1);
+    factory.workers[0].emitMessage(success(factory.workers[0].posted[0].message));
+    await expect(active).resolves.toMatchObject({ cleanedSize: 2 });
+  });
+
+  it("skips an aborted waiter without overtaking the next FIFO request", async () => {
+    const factory = workerFactory();
+    const pool = createImageWorkerPool({ size: 1, createWorker: factory.createWorker });
+    const active = pool.clean(request("active"));
+    const controller = new AbortController();
+    const retired = pool.clean(request("retired"), controller.signal);
+    const next = pool.clean(request("next"));
+
+    controller.abort();
+    await expect(retired).rejects.toMatchObject({ name: "AbortError" });
+    factory.workers[0].emitMessage(success(factory.workers[0].posted[0].message));
+    await expect(active).resolves.toMatchObject({ cleanedSize: 2 });
+    expect(factory.workers[0].posted).toHaveLength(2);
+    expect(factory.workers[0].posted[1].message.id).toBe("next");
+
+    factory.workers[0].emitMessage(success(factory.workers[0].posted[1].message));
+    await expect(next).resolves.toMatchObject({ cleanedSize: 2 });
+  });
+
+  it("rejects waiters clearly when no live worker can be recreated", async () => {
+    const workers: FakeWorker[] = [];
+    let factoryCalls = 0;
+    const createWorker = () => {
+      factoryCalls += 1;
+      if (factoryCalls > 1) throw new Error("sin reemplazo");
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    };
+    const pool = createImageWorkerPool({ size: 1, createWorker });
+    const active = pool.clean(request("active"));
+    const waiting = pool.clean(request("waiting"));
+
+    workers[0].emitError("worker muerto");
+
+    await expect(active).rejects.toThrow("worker muerto");
+    await expect(waiting).rejects.toThrow(/ning[uú]n worker activo/i);
+    await expect(pool.clean(request("later"))).rejects.toThrow(/ning[uú]n worker activo/i);
+  });
+
+  it("destroy aborts active and waiting requests without replacement", async () => {
+    const factory = workerFactory();
+    const pool = createImageWorkerPool({ size: 1, createWorker: factory.createWorker });
+    const active = pool.clean(request("active"));
+    const waiting = pool.clean(request("waiting"));
+
+    pool.destroy();
+
+    await expect(active).rejects.toMatchObject({ name: "AbortError" });
+    await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+    expect(factory.workers).toHaveLength(1);
+    expect(factory.workers[0].terminate).toHaveBeenCalledOnce();
   });
 
   it("ignores mismatched messages", async () => {

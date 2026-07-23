@@ -69,6 +69,7 @@ function isAbortError(error: unknown): boolean {
 }
 
 function errorMessage(error: unknown): string {
+  if (error instanceof DOMException && error.message) return error.message;
   return error instanceof Error && error.message ? error.message : "Error al procesar la imagen.";
 }
 
@@ -148,15 +149,15 @@ export function useBatchProcessor(
   const schedule = useCallback((input: InputImage, generation: number): void => {
     const resources = resourcesRef.current;
     if (!resources) return;
-    void resources.queue
-      .add({ input, generation }, { key: input.id })
+    const task = resources.queue.add({ input, generation }, { key: input.id });
+    void task
       .then((result) => {
         if (!mountedRef.current || generationRef.current !== generation) return;
         dispatch({ type: "item/completed", generation, id: input.id, result });
       })
       .catch((error: unknown) => {
         if (!mountedRef.current || generationRef.current !== generation) return;
-        if (isAbortError(error)) {
+        if (task.signal.aborted && isAbortError(error)) {
           dispatch({ type: "item/cancelled", generation, id: input.id });
         } else {
           dispatch({

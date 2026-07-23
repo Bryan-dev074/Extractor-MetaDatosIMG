@@ -59,6 +59,15 @@ interface ActiveRequest {
   destroy: () => void;
 }
 
+interface WaitingRequest {
+  request: WorkerRequest;
+  signal?: AbortSignal;
+  settled: boolean;
+  resolve: (result: CleanResult) => void;
+  reject: (error: unknown) => void;
+  onAbort: () => void;
+}
+
 interface WorkerSlot {
   worker: ImageWorker | null;
   active: ActiveRequest | null;
@@ -116,93 +125,184 @@ export function createImageWorkerPool(
   }
 
   let terminal = false;
+  const waiting: WaitingRequest[] = [];
+  let draining = false;
+
+  const noLiveWorkerError = (): Error =>
+    new Error("No queda ningún worker activo y no se pudo recrear el pool.");
+
+  const settleWaiting = (
+    entry: WaitingRequest,
+    outcome: { result: CleanResult } | { error: unknown },
+  ): void => {
+    if (entry.settled) return;
+    entry.settled = true;
+    entry.signal?.removeEventListener("abort", entry.onAbort);
+    if ("result" in outcome) entry.resolve(outcome.result);
+    else entry.reject(outcome.error);
+  };
+
+  const rejectAllWaiting = (error: unknown): void => {
+    for (const entry of waiting.splice(0)) {
+      settleWaiting(entry, { error });
+    }
+  };
+
+  const liveWorkerCount = (): number =>
+    slots.reduce((count, slot) => count + (slot.worker ? 1 : 0), 0);
+
+  const recreateDeadSlots = (): boolean => {
+    for (const slot of slots) {
+      if (terminal || slot.worker || slot.active) continue;
+      try {
+        slot.worker = createWorker();
+      } catch {
+        slot.worker = null;
+      }
+    }
+    return liveWorkerCount() > 0;
+  };
+
+  let drainWaiting: () => void;
+
+  const start = (slot: WorkerSlot, entry: WaitingRequest): void => {
+    const assignedWorker = slot.worker;
+    if (!assignedWorker) {
+      settleWaiting(entry, { error: noLiveWorkerError() });
+      return;
+    }
+
+    const cleanup = (): void => {
+      assignedWorker.removeEventListener("message", onMessage);
+      assignedWorker.removeEventListener("error", onError);
+      assignedWorker.removeEventListener("messageerror", onMessageError);
+      entry.signal?.removeEventListener("abort", onAbort);
+    };
+
+    const finish = (
+      outcome: { result: CleanResult } | { error: unknown },
+      replaceWorker: boolean,
+    ): void => {
+      if (active.finished) return;
+      active.finished = true;
+      cleanup();
+
+      if (replaceWorker && slot.worker === assignedWorker) {
+        assignedWorker.terminate();
+        slot.worker = null;
+        if (!terminal) {
+          try {
+            slot.worker = createWorker();
+          } catch {
+            slot.worker = null;
+          }
+        }
+      }
+      if (slot.active === active) slot.active = null;
+      settleWaiting(entry, outcome);
+      drainWaiting();
+    };
+
+    const onMessage: EventListener = (event) => {
+      if (slot.worker !== assignedWorker || slot.active !== active) return;
+      const message = (event as MessageEvent<unknown>).data;
+      if (!isWorkerResponse(message)) return;
+      if (
+        message.id !== entry.request.id ||
+        message.generation !== entry.request.generation ||
+        message.kind !== entry.request.kind
+      ) {
+        return;
+      }
+      if (message.ok) finish({ result: message.result }, false);
+      else finish({ error: new Error(message.error) }, false);
+    };
+
+    const onError: EventListener = (event) => {
+      if (slot.worker !== assignedWorker || slot.active !== active) return;
+      finish({ error: eventError(event) }, true);
+    };
+
+    const onMessageError: EventListener = () => {
+      if (slot.worker !== assignedWorker || slot.active !== active) return;
+      finish({ error: new Error("No se pudo decodificar la respuesta del worker.") }, true);
+    };
+
+    const onAbort = (): void => {
+      if (slot.worker !== assignedWorker || slot.active !== active) return;
+      finish({ error: abortError(entry.signal?.reason) }, true);
+    };
+
+    const active: ActiveRequest = {
+      finished: false,
+      destroy: () => finish({ error: abortError("El pool fue destruido.") }, false),
+    };
+    slot.active = active;
+    assignedWorker.addEventListener("message", onMessage);
+    assignedWorker.addEventListener("error", onError);
+    assignedWorker.addEventListener("messageerror", onMessageError);
+    entry.signal?.addEventListener("abort", onAbort, { once: true });
+
+    try {
+      assignedWorker.postMessage(entry.request, [entry.request.bytes]);
+    } catch (error) {
+      finish({ error }, true);
+    }
+  };
+
+  drainWaiting = (): void => {
+    if (terminal || draining) return;
+    draining = true;
+    try {
+      while (waiting.length > 0) {
+        let slot = slots.find((candidate) => candidate.worker !== null && candidate.active === null);
+        if (!slot) {
+          if (liveWorkerCount() > 0) return;
+          if (!recreateDeadSlots()) {
+            rejectAllWaiting(noLiveWorkerError());
+            return;
+          }
+          slot = slots.find(
+            (candidate) => candidate.worker !== null && candidate.active === null,
+          );
+          if (!slot) return;
+        }
+
+        const entry = waiting.shift();
+        if (!entry || entry.settled) continue;
+        entry.signal?.removeEventListener("abort", entry.onAbort);
+        if (entry.signal?.aborted) {
+          settleWaiting(entry, { error: abortError(entry.signal.reason) });
+          continue;
+        }
+        start(slot, entry);
+      }
+    } finally {
+      draining = false;
+    }
+  };
 
   const execute = (request: WorkerRequest, signal?: AbortSignal): Promise<CleanResult> => {
     if (terminal) return Promise.reject(new Error("El pool de workers fue destruido."));
     if (signal?.aborted) return Promise.reject(abortError(signal.reason));
-    const slot = slots.find((candidate) => candidate.worker !== null && candidate.active === null);
-    if (!slot || !slot.worker) {
-      return Promise.reject(new Error("No hay un worker disponible para ejecutar la tarea."));
-    }
 
-    const assignedWorker = slot.worker;
     return new Promise<CleanResult>((resolve, reject) => {
-      const cleanup = (): void => {
-        assignedWorker.removeEventListener("message", onMessage);
-        assignedWorker.removeEventListener("error", onError);
-        assignedWorker.removeEventListener("messageerror", onMessageError);
-        signal?.removeEventListener("abort", onAbort);
+      const entry: WaitingRequest = {
+        request,
+        signal,
+        settled: false,
+        resolve,
+        reject,
+        onAbort: () => {
+          const index = waiting.indexOf(entry);
+          if (index < 0) return;
+          waiting.splice(index, 1);
+          settleWaiting(entry, { error: abortError(signal?.reason) });
+        },
       };
-
-      const finish = (
-        outcome: { result: CleanResult } | { error: unknown },
-        replaceWorker: boolean,
-      ): void => {
-        if (active.finished) return;
-        active.finished = true;
-        cleanup();
-
-        if (replaceWorker) {
-          assignedWorker.terminate();
-          if (!terminal) {
-            try {
-              slot.worker = createWorker();
-            } catch {
-              slot.worker = null;
-            }
-          }
-        }
-        slot.active = null;
-
-        if ("result" in outcome) resolve(outcome.result);
-        else reject(outcome.error);
-      };
-
-      const onMessage: EventListener = (event) => {
-        if (slot.worker !== assignedWorker || slot.active !== active) return;
-        const message = (event as MessageEvent<unknown>).data;
-        if (!isWorkerResponse(message)) return;
-        if (
-          message.id !== request.id ||
-          message.generation !== request.generation ||
-          message.kind !== request.kind
-        ) {
-          return;
-        }
-        if (message.ok) finish({ result: message.result }, false);
-        else finish({ error: new Error(message.error) }, false);
-      };
-
-      const onError: EventListener = (event) => {
-        if (slot.worker !== assignedWorker || slot.active !== active) return;
-        finish({ error: eventError(event) }, true);
-      };
-
-      const onMessageError: EventListener = () => {
-        if (slot.worker !== assignedWorker || slot.active !== active) return;
-        finish({ error: new Error("No se pudo decodificar la respuesta del worker.") }, true);
-      };
-
-      const onAbort = (): void => {
-        if (slot.worker !== assignedWorker || slot.active !== active) return;
-        finish({ error: abortError(signal?.reason) }, true);
-      };
-
-      const active: ActiveRequest = {
-        finished: false,
-        destroy: () => finish({ error: abortError("El pool fue destruido.") }, false),
-      };
-      slot.active = active;
-      assignedWorker.addEventListener("message", onMessage);
-      assignedWorker.addEventListener("error", onError);
-      assignedWorker.addEventListener("messageerror", onMessageError);
-      signal?.addEventListener("abort", onAbort, { once: true });
-
-      try {
-        assignedWorker.postMessage(request, [request.bytes]);
-      } catch (error) {
-        finish({ error }, true);
-      }
+      waiting.push(entry);
+      signal?.addEventListener("abort", entry.onAbort, { once: true });
+      drainWaiting();
     });
   };
 
@@ -219,6 +319,7 @@ export function createImageWorkerPool(
     destroy() {
       if (terminal) return;
       terminal = true;
+      rejectAllWaiting(abortError("El pool fue destruido."));
       for (const slot of slots) {
         slot.active?.destroy();
         slot.worker?.terminate();

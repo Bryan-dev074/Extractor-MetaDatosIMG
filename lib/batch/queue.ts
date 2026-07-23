@@ -9,11 +9,15 @@ export interface TaskOptions {
   key?: TaskKey;
 }
 
+export interface TaskPromise<R> extends Promise<R> {
+  readonly signal: AbortSignal;
+}
+
 export interface TaskQueue<T, R> {
   readonly pending: number;
   readonly running: number;
   readonly disposed: boolean;
-  add(value: T, options?: TaskOptions | TaskKey): Promise<R>;
+  add(value: T, options?: TaskOptions | TaskKey): TaskPromise<R>;
   cancel(key: TaskKey, reason?: unknown): boolean;
   cancelAll(reason?: unknown): void;
   dispose(reason?: unknown): void;
@@ -27,6 +31,7 @@ interface QueueEntry<T, R> {
   explicitKey: boolean;
   controller: AbortController;
   status: EntryStatus;
+  outwardSettled: boolean;
   resolve: (value: R | PromiseLike<R>) => void;
   reject: (reason?: unknown) => void;
 }
@@ -51,6 +56,16 @@ function optionKey(options?: TaskOptions | TaskKey): {
   return { explicit: false, key: Symbol("anonymous-task") };
 }
 
+function withSignal<R>(promise: Promise<R>, signal: AbortSignal): TaskPromise<R> {
+  Object.defineProperty(promise, "signal", { value: signal });
+  return promise as TaskPromise<R>;
+}
+
+function rejectedTask<R>(error: unknown): TaskPromise<R> {
+  const controller = new AbortController();
+  return withSignal(Promise.reject(error), controller.signal);
+}
+
 export function createTaskQueue<T, R>({
   concurrency,
   run,
@@ -68,12 +83,25 @@ export function createTaskQueue<T, R>({
     if (entry.explicitKey && keyed.get(entry.key) === entry) keyed.delete(entry.key);
   };
 
-  const settleQueuedCancellation = (entry: QueueEntry<T, R>, reason?: unknown): void => {
-    if (entry.status !== "queued") return;
-    entry.status = "settled";
-    entry.controller.abort(reason);
+  const resolveOutward = (entry: QueueEntry<T, R>, value: R): void => {
+    if (entry.outwardSettled) return;
+    entry.outwardSettled = true;
     releaseKey(entry);
-    entry.reject(cancellationError(reason));
+    entry.resolve(value);
+  };
+
+  const rejectOutward = (entry: QueueEntry<T, R>, error: unknown): void => {
+    if (entry.outwardSettled) return;
+    entry.outwardSettled = true;
+    releaseKey(entry);
+    entry.reject(error);
+  };
+
+  const cancelEntry = (entry: QueueEntry<T, R>, reason?: unknown): void => {
+    if (entry.status === "settled") return;
+    entry.controller.abort(reason);
+    rejectOutward(entry, cancellationError(reason));
+    if (entry.status === "queued") entry.status = "settled";
   };
 
   const drain = (): void => {
@@ -93,22 +121,21 @@ export function createTaskQueue<T, R>({
       void outcome.then(
         (value) => {
           if (entry.controller.signal.aborted) {
-            entry.reject(cancellationError(entry.controller.signal.reason));
+            rejectOutward(entry, cancellationError(entry.controller.signal.reason));
           } else {
-            entry.resolve(value);
+            resolveOutward(entry, value);
           }
         },
         (error) => {
           if (entry.controller.signal.aborted) {
-            entry.reject(cancellationError(entry.controller.signal.reason));
+            rejectOutward(entry, cancellationError(entry.controller.signal.reason));
           } else {
-            entry.reject(error);
+            rejectOutward(entry, error);
           }
         },
       ).finally(() => {
         entry.status = "settled";
         active.delete(entry);
-        releaseKey(entry);
         drain();
       });
     }
@@ -125,46 +152,51 @@ export function createTaskQueue<T, R>({
       return terminal;
     },
     add(value, options) {
-      if (terminal) return Promise.reject(new Error("La cola fue eliminada."));
+      if (terminal) return rejectedTask(new Error("La cola fue eliminada."));
       const { explicit, key } = optionKey(options);
       if (explicit && keyed.has(key)) {
-        return Promise.reject(new Error("La cola ya contiene una tarea con esa clave duplicada."));
+        return rejectedTask(new Error("La cola ya contiene una tarea con esa clave duplicada."));
       }
 
-      const promise = new Promise<R>((resolve, reject) => {
-        const entry: QueueEntry<T, R> = {
-          value,
-          key,
-          explicitKey: explicit,
-          controller: new AbortController(),
-          status: "queued",
-          resolve,
-          reject,
-        };
-        queued.push(entry);
-        if (explicit) keyed.set(key, entry);
-      });
+      const controller = new AbortController();
+      let resolve!: (result: R | PromiseLike<R>) => void;
+      let reject!: (reason?: unknown) => void;
+      const promise = withSignal(new Promise<R>((onResolve, onReject) => {
+        resolve = onResolve;
+        reject = onReject;
+      }), controller.signal);
+      const entry: QueueEntry<T, R> = {
+        value,
+        key,
+        explicitKey: explicit,
+        controller,
+        status: "queued",
+        outwardSettled: false,
+        resolve,
+        reject,
+      };
+      queued.push(entry);
+      if (explicit) keyed.set(key, entry);
       drain();
       return promise;
     },
     cancel(key, reason) {
       const entry = keyed.get(key);
       if (!entry || entry.status === "settled") return false;
-      if (entry.status === "queued") settleQueuedCancellation(entry, reason);
-      else entry.controller.abort(reason);
+      cancelEntry(entry, reason);
       return true;
     },
     cancelAll(reason) {
-      for (const entry of [...queued]) settleQueuedCancellation(entry, reason);
+      for (const entry of [...queued]) cancelEntry(entry, reason);
       queued.length = 0;
-      for (const entry of active) entry.controller.abort(reason);
+      for (const entry of active) cancelEntry(entry, reason);
     },
     dispose(reason) {
       if (terminal) return;
       terminal = true;
-      for (const entry of [...queued]) settleQueuedCancellation(entry, reason);
+      for (const entry of [...queued]) cancelEntry(entry, reason);
       queued.length = 0;
-      for (const entry of active) entry.controller.abort(reason);
+      for (const entry of active) cancelEntry(entry, reason);
     },
   };
 }
