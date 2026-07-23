@@ -335,6 +335,41 @@ describe("archive generation", () => {
     expect(writer.abort).toHaveBeenCalledTimes(1);
   });
 
+  it("suppresses final progress when abort lands after close resolves but before continuation", async () => {
+    const controller = new AbortController();
+    let markCloseStarted!: () => void;
+    let resolveClose!: () => void;
+    const closeStarted = new Promise<void>((resolve) => {
+      markCloseStarted = resolve;
+    });
+    const closeResult = new Promise<void>((resolve) => {
+      resolveClose = resolve;
+    });
+    const progress = vi.fn();
+    const writer: ArchiveWriter = {
+      write: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn(() => {
+        markCloseStarted();
+        return closeResult;
+      }),
+      abort: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const pending = generateArchive(plan(), {
+      destination: { kind: "writer", writer },
+      signal: controller.signal,
+      onProgress: progress,
+    });
+    await closeStarted;
+    resolveClose();
+    queueMicrotask(() => controller.abort());
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(writer.close).toHaveBeenCalledTimes(1);
+    expect(writer.abort).toHaveBeenCalledTimes(1);
+    expect(progress).not.toHaveBeenCalledWith(100);
+  });
+
   it("cancels immediately while close is pending and observes its late rejection", async () => {
     const controller = new AbortController();
     let markCloseStarted!: () => void;

@@ -515,6 +515,7 @@ async function generateArchiveInternal(
         options.destination.writer.close(),
         options.signal,
       );
+      throwIfAborted(options.signal);
       result = {
         kind: "writer",
         suggestedName: plan.suggestedName,
