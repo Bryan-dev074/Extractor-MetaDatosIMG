@@ -63,6 +63,44 @@ describe("createSmoothMask", () => {
     expect(mask[2 * 5 + 4]).toBe(0);
   });
 
+  it("accepts RGB delta 12 and rejects 13 independently of luma and chroma", () => {
+    const atLimit = image(5, 5, (x, y) =>
+      x === 2 && y === 1 ? [112, 104, 104, 255] : [100, 100, 100, 255],
+    );
+    const overLimit = image(5, 5, (x, y) =>
+      x === 2 && y === 1 ? [113, 105, 105, 255] : [100, 100, 100, 255],
+    );
+
+    expect(createSmoothMask(atLimit)[2 * 5 + 2]).toBe(1);
+    expect(createSmoothMask(overLimit)[2 * 5 + 2]).toBe(0);
+  });
+
+  it("accepts chroma delta 8 and rejects 9", () => {
+    const atLimit = image(5, 5, (x, y) =>
+      x === 2 && y === 1 ? [108, 100, 100, 255] : [100, 100, 100, 255],
+    );
+    const overLimit = image(5, 5, (x, y) =>
+      x === 2 && y === 1 ? [109, 100, 100, 255] : [100, 100, 100, 255],
+    );
+
+    expect(createSmoothMask(atLimit)[2 * 5 + 2]).toBe(1);
+    expect(createSmoothMask(overLimit)[2 * 5 + 2]).toBe(0);
+  });
+
+  it("accepts local 3x3 luma range 12 and rejects 13", () => {
+    const atLimit = image(5, 5, (x, y) => {
+      const value = x === 1 && y === 1 ? 112 : 100;
+      return [value, value, value, 255];
+    });
+    const overLimit = image(5, 5, (x, y) => {
+      const value = x === 1 && y === 1 ? 113 : 100;
+      return [value, value, value, 255];
+    });
+
+    expect(createSmoothMask(atLimit)[2 * 5 + 2]).toBe(1);
+    expect(createSmoothMask(overLimit)[2 * 5 + 2]).toBe(0);
+  });
+
   it("rejects one-level threshold excess, transparency, and isoluminant chroma edges", () => {
     const lumaEdge = image(5, 5, (x, y) =>
       x === 2 && y === 1 ? [107, 107, 107, 255] : [100, 100, 100, 255],
@@ -132,20 +170,23 @@ describe("applyAdaptiveDither", () => {
     let actualDeltaSum = 0;
     let actualChangedSamples = 0;
     for (let offset = 0; offset < source.data.length; offset += 4) {
+      const pixelDeltas: number[] = [];
       for (let channel = 0; channel < 3; channel += 1) {
         const delta = first.image.data[offset + channel] - source.data[offset + channel];
         expect([-1, 0, 1]).toContain(delta);
         if (!first.mask[offset / 4]) expect(delta).toBe(0);
         actualDeltaSum += delta;
         if (delta !== 0) actualChangedSamples += 1;
+        pixelDeltas.push(delta);
       }
+      expect(new Set(pixelDeltas).size).toBe(1);
       expect(first.image.data[offset + 3]).toBe(source.data[offset + 3]);
     }
     expect(actualDeltaSum).toBe(0);
     expect(actualChangedSamples).toBe(first.changedSamples);
   });
 
-  it("leaves saturated samples unchanged and never creates an unbalanced odd tail", () => {
+  it("leaves saturated pixels unchanged and never creates an unbalanced RGB pair", () => {
     const saturated = image(5, 5, (x, y) => [
       x === 2 && y === 2 ? 255 : 254,
       0,
@@ -162,7 +203,7 @@ describe("applyAdaptiveDither", () => {
       }
       expect(result.image.data[offset + 3]).toBe(255);
     }
-    expect(result.changedSamples % 2).toBe(0);
+    expect(result.changedSamples % 6).toBe(0);
     expect(result.sumDelta).toBe(0);
   });
 

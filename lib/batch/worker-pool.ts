@@ -152,7 +152,9 @@ export class TikTokWorkerFallbackError extends Error {
 }
 
 export function createDefaultImageWorker(): ImageWorker {
-  return new Worker(new URL("../workers/image-worker.ts", import.meta.url), { type: "module" });
+  return new Worker(new URL("../../workers/image-worker.ts", import.meta.url), {
+    type: "module",
+  });
 }
 
 export function createImageWorkerPool(
@@ -490,27 +492,116 @@ export interface TikTokProcessor {
   destroy(): void;
 }
 
+interface TikTokFallbackEntry {
+  input: Blob;
+  signal: AbortSignal;
+  started: boolean;
+  outwardSettled: boolean;
+  resolve: (result: TikTokExportResult) => void;
+  reject: (error: unknown) => void;
+  onAbort: () => void;
+}
+
 export function createTikTokProcessor(
   options: TikTokProcessorOptions = {},
 ): TikTokProcessor {
-  const pool =
-    options.workerPool ??
-    createTikTokWorkerPool({ createWorker: options.createWorker });
+  let pool: TikTokPoolLike | null = options.workerPool ?? null;
+  if (!pool) {
+    try {
+      pool = createTikTokWorkerPool({ createWorker: options.createWorker });
+    } catch {
+      // Worker construction can fail eagerly under CSP, module-loading, or
+      // browser support restrictions. The HTML path remains fully usable.
+      pool = null;
+    }
+  }
   const exportOnMainThread =
     options.exportOnMainThread ??
     ((input: Blob, signal: AbortSignal) =>
       exportForTikTok(input, signal, { adapter: createHtmlTikTokAdapter() }));
   let terminal = false;
-  let fallbackTail: Promise<void> = Promise.resolve();
   const activeControllers = new Set<AbortController>();
+  const fallbackWaiting: TikTokFallbackEntry[] = [];
+  let fallbackActive: TikTokFallbackEntry | null = null;
+  let drainFallback: () => void;
 
-  const serializeFallback = <Result>(run: () => Promise<Result>): Promise<Result> => {
-    const operation = fallbackTail.then(run, run);
-    fallbackTail = operation.then(
-      () => undefined,
-      () => undefined,
-    );
-    return operation;
+  const settleFallback = (
+    entry: TikTokFallbackEntry,
+    outcome: { result: TikTokExportResult } | { error: unknown },
+  ): void => {
+    if (entry.outwardSettled) return;
+    entry.outwardSettled = true;
+    entry.signal.removeEventListener("abort", entry.onAbort);
+    if ("result" in outcome) entry.resolve(outcome.result);
+    else entry.reject(outcome.error);
+  };
+
+  const runFallback = async (entry: TikTokFallbackEntry): Promise<void> => {
+    try {
+      throwIfAborted(entry.signal);
+      if (terminal) throw abortError("El procesador TikTok fue destruido.");
+      const result = await exportOnMainThread(entry.input, entry.signal);
+      if (!terminal && !entry.signal.aborted) {
+        settleFallback(entry, { result });
+      }
+    } catch (error) {
+      if (!entry.outwardSettled) {
+        settleFallback(entry, {
+          error:
+            entry.signal.aborted
+              ? abortError(entry.signal.reason)
+              : error,
+        });
+      }
+    } finally {
+      if (fallbackActive === entry) fallbackActive = null;
+      if (!terminal) drainFallback();
+    }
+  };
+
+  drainFallback = (): void => {
+    if (terminal || fallbackActive) return;
+    while (fallbackWaiting.length > 0) {
+      const entry = fallbackWaiting.shift();
+      if (!entry || entry.outwardSettled) continue;
+      if (entry.signal.aborted) {
+        settleFallback(entry, { error: abortError(entry.signal.reason) });
+        continue;
+      }
+      entry.started = true;
+      fallbackActive = entry;
+      void runFallback(entry);
+      return;
+    }
+  };
+
+  const enqueueFallback = (
+    input: Blob,
+    signal: AbortSignal,
+  ): Promise<TikTokExportResult> => {
+    if (terminal) return Promise.reject(abortError("El procesador TikTok fue destruido."));
+    if (signal.aborted) return Promise.reject(abortError(signal.reason));
+    return new Promise<TikTokExportResult>((resolve, reject) => {
+      const entry: TikTokFallbackEntry = {
+        input,
+        signal,
+        started: false,
+        outwardSettled: false,
+        resolve,
+        reject,
+        onAbort: () => {
+          if (!entry.started) {
+            const index = fallbackWaiting.indexOf(entry);
+            if (index >= 0) fallbackWaiting.splice(index, 1);
+          }
+          settleFallback(entry, { error: abortError(signal.reason) });
+          if (!fallbackActive) drainFallback();
+        },
+      };
+      fallbackWaiting.push(entry);
+      signal.addEventListener("abort", entry.onAbort, { once: true });
+      drainFallback();
+    });
   };
 
   return {
@@ -526,6 +617,9 @@ export function createTikTokProcessor(
       signal?.addEventListener("abort", relayAbort, { once: true });
       activeControllers.add(controller);
       try {
+        if (!pool) {
+          return await enqueueFallback(input, controller.signal);
+        }
         const bytes = await input.arrayBuffer();
         throwIfAborted(controller.signal);
         try {
@@ -541,11 +635,7 @@ export function createTikTokProcessor(
           );
         } catch (error) {
           if (!(error instanceof TikTokWorkerFallbackError)) throw error;
-          return await serializeFallback(async () => {
-            throwIfAborted(controller.signal);
-            if (terminal) throw abortError("El procesador TikTok fue destruido.");
-            return exportOnMainThread(input, controller.signal);
-          });
+          return await enqueueFallback(input, controller.signal);
         }
       } finally {
         signal?.removeEventListener("abort", relayAbort);
@@ -559,7 +649,7 @@ export function createTikTokProcessor(
         controller.abort("El procesador TikTok fue destruido.");
       }
       activeControllers.clear();
-      pool.destroy();
+      pool?.destroy();
     },
   };
 }

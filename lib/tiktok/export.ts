@@ -156,6 +156,26 @@ function nativeImageData(image: ImageData): ImageData {
   }
 }
 
+export function compositeRgbaOnWhite(image: ImageData): ImageData {
+  const output = new Uint8ClampedArray(image.data.length);
+  for (let offset = 0; offset < image.data.length; offset += 4) {
+    const alpha = image.data[offset + 3];
+    const inverseAlpha = 255 - alpha;
+    for (let channel = 0; channel < 3; channel += 1) {
+      output[offset + channel] = Math.round(
+        (image.data[offset + channel] * alpha + 255 * inverseAlpha) / 255,
+      );
+    }
+    output[offset + 3] = 255;
+  }
+  return {
+    data: output,
+    width: image.width,
+    height: image.height,
+    colorSpace: "srgb",
+  } as ImageData;
+}
+
 function offscreenFailure(stage: string, error: unknown): TikTokMainThreadFallbackRequiredError {
   const detail = error instanceof Error && error.message ? ` ${error.message}` : "";
   return new TikTokMainThreadFallbackRequiredError(
@@ -203,14 +223,13 @@ export function createOffscreenTikTokAdapter(): TikTokCanvasAdapter {
     },
     async encodeJpeg(image, request) {
       try {
-        const source = createCanvas(image.width, image.height);
-        getContext2d(source).putImageData(nativeImageData(image), 0, 0);
-        const destination = createCanvas(image.width, image.height);
-        const context = getContext2d(destination);
-        context.fillStyle = `rgb(${request.matte.join(" ")})`;
-        context.fillRect(0, 0, image.width, image.height);
-        context.drawImage(source, 0, 0);
-        return await destination.convertToBlob({
+        const canvas = createCanvas(image.width, image.height);
+        getContext2d(canvas).putImageData(
+          nativeImageData(compositeRgbaOnWhite(image)),
+          0,
+          0,
+        );
+        return await canvas.convertToBlob({
           type: "image/jpeg",
           quality: request.quality,
         });
@@ -273,14 +292,13 @@ export function createHtmlTikTokAdapter(): TikTokCanvasAdapter {
       return htmlCanvasBlob(canvas, "image/png");
     },
     async encodeJpeg(image, request) {
-      const source = createCanvas(image.width, image.height);
-      getContext2d(source).putImageData(nativeImageData(image), 0, 0);
-      const destination = createCanvas(image.width, image.height);
-      const context = getContext2d(destination);
-      context.fillStyle = `rgb(${request.matte.join(" ")})`;
-      context.fillRect(0, 0, image.width, image.height);
-      context.drawImage(source, 0, 0);
-      return htmlCanvasBlob(destination, "image/jpeg", request.quality);
+      const canvas = createCanvas(image.width, image.height);
+      getContext2d(canvas).putImageData(
+        nativeImageData(compositeRgbaOnWhite(image)),
+        0,
+        0,
+      );
+      return htmlCanvasBlob(canvas, "image/jpeg", request.quality);
     },
   };
 }

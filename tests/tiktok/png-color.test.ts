@@ -97,6 +97,66 @@ describe("normalizeTikTokPng", () => {
   });
 
   it.each([
+    ["bKGD after IDAT", () =>
+      concat(
+        png().slice(0, 33),
+        chunk("IDAT", Uint8Array.of(1)),
+        chunk("bKGD", new Uint8Array(6)),
+        chunk("IEND"),
+      )],
+    ["tRNS after IDAT", () =>
+      concat(
+        png([], undefined, 2).slice(0, 33),
+        chunk("IDAT", Uint8Array.of(1)),
+        chunk("tRNS", new Uint8Array(6)),
+        chunk("IEND"),
+      )],
+    ["pHYs after IDAT", () =>
+      concat(
+        png().slice(0, 33),
+        chunk("IDAT", Uint8Array.of(1)),
+        chunk("pHYs", concat(u32(1), u32(1), Uint8Array.of(0))),
+        chunk("IEND"),
+      )],
+    ["sPLT after IDAT", () =>
+      concat(
+        png().slice(0, 33),
+        chunk("IDAT", Uint8Array.of(1)),
+        chunk("sPLT", Uint8Array.of(110, 0, 8, 1, 2, 3, 4, 5, 0, 1)),
+        chunk("IEND"),
+      )],
+    ["sBIT after PLTE", () =>
+      png([
+        chunk("PLTE", Uint8Array.of(1, 2, 3)),
+        chunk("sBIT", Uint8Array.of(8, 8, 8, 8)),
+      ])],
+    ["bKGD before PLTE", () =>
+      png([
+        chunk("bKGD", new Uint8Array(6)),
+        chunk("PLTE", Uint8Array.of(1, 2, 3)),
+      ])],
+    ["hIST without PLTE", () => png([chunk("hIST", Uint8Array.of(0, 1))])],
+    ["hIST before PLTE", () =>
+      png([
+        chunk("hIST", Uint8Array.of(0, 1)),
+        chunk("PLTE", Uint8Array.of(1, 2, 3)),
+      ])],
+    ["hIST length not matching PLTE", () =>
+      png([
+        chunk("PLTE", Uint8Array.of(1, 2, 3, 4, 5, 6)),
+        chunk("hIST", Uint8Array.of(0, 1)),
+      ])],
+    ["tRNS with RGBA", () => png([chunk("tRNS", new Uint8Array(6))])],
+    ["duplicate pHYs", () =>
+      png([
+        chunk("pHYs", concat(u32(1), u32(1), Uint8Array.of(0))),
+        chunk("pHYs", concat(u32(1), u32(1), Uint8Array.of(0))),
+      ])],
+  ] as const)("rejects known ancillary violation: %s", (_label, makeBytes) => {
+    expect(() => normalizeTikTokPng(makeBytes(), { width: 3, height: 2 })).toThrow();
+  });
+
+  it.each([
     ["bit depth", png([], undefined, 6).map((value, index) => (index === 24 ? 16 : value))],
     ["indexed color", png([], undefined, 3)],
   ] as const)("rejects unsupported static PNG %s", (_label, bytes) => {

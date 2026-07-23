@@ -132,13 +132,12 @@ function transformedRank(
   seed: number,
   tileX: number,
   tileY: number,
-  channel: number,
 ): number {
   const mixed = mix32(
     seed ^
       Math.imul(tileX + 1, 0x9e3779b1) ^
       Math.imul(tileY + 1, 0x85ebca77) ^
-      Math.imul(channel + 1, 0xc2b2ae3d),
+      0xc2b2ae3d,
   );
   let x = (localX + ((mixed >>> 8) & 63)) & 63;
   let y = (localY + ((mixed >>> 16) & 63)) & 63;
@@ -181,7 +180,7 @@ export function applyAdaptiveDither(image: ImageData, seed: number): DitherResul
   const output = new Uint8ClampedArray(image.data);
   let eligiblePixels = 0;
   for (const value of mask) eligiblePixels += value;
-  let changedSamples = 0;
+  let changedPixels = 0;
   let sumDelta = 0;
 
   const canShiftTogether = (pixel: number): boolean => {
@@ -225,10 +224,12 @@ export function applyAdaptiveDither(image: ImageData, seed: number): DitherResul
     for (let channel = 0; channel < 3; channel += 1) {
       output[firstOffset + channel] = image.data[firstOffset + channel] + firstDelta;
       output[secondOffset + channel] = image.data[secondOffset + channel] - firstDelta;
+      sumDelta += firstDelta;
+      sumDelta -= firstDelta;
     }
     boundaryUsed[first] = 1;
     boundaryUsed[second] = 1;
-    changedSamples += 6;
+    changedPixels += 2;
   };
 
   // In smooth regions, gently bridge existing one-level steps that coincide
@@ -309,7 +310,6 @@ export function applyAdaptiveDither(image: ImageData, seed: number): DitherResul
             normalizedSeed,
             tileX,
             tileY,
-            0,
           );
           pixelByRank[rank] = pixel;
           blockByRank[rank] =
@@ -343,9 +343,10 @@ export function applyAdaptiveDither(image: ImageData, seed: number): DitherResul
         for (let channel = 0; channel < 3; channel += 1) {
           output[firstOffset + channel] = image.data[firstOffset + channel] + firstDelta;
           output[secondOffset + channel] = image.data[secondOffset + channel] - firstDelta;
+          sumDelta += firstDelta;
+          sumDelta -= firstDelta;
         }
-        changedSamples += 6;
-        sumDelta += 3 * firstDelta - 3 * firstDelta;
+        changedPixels += 2;
         pendingByBlock[block] = -1;
         pairIndexByBlock[block] += 1;
       }
@@ -353,6 +354,7 @@ export function applyAdaptiveDither(image: ImageData, seed: number): DitherResul
   }
 
   const colorSpace = image.colorSpace === "display-p3" ? "display-p3" : "srgb";
+  const changedSamples = changedPixels * 3;
   return {
     image: makeImageData(output, width, height, colorSpace),
     mask,

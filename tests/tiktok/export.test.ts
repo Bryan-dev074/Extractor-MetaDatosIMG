@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  compositeRgbaOnWhite,
   createOffscreenTikTokAdapter,
   DEFAULT_TIKTOK_LIMITS,
   exportForTikTok,
@@ -61,6 +62,72 @@ function fakeAdapter(options: {
 }
 
 describe("exportForTikTok", () => {
+  it("produces the actual opaque white-matte pixels before JPEG encoding", () => {
+    const source = {
+      width: 3,
+      height: 1,
+      colorSpace: "srgb",
+      data: Uint8ClampedArray.of(
+        255, 0, 0, 0,
+        0, 0, 0, 128,
+        40, 80, 120, 255,
+      ),
+    } as ImageData;
+    const before = source.data.slice();
+
+    const flattened = compositeRgbaOnWhite(source);
+
+    expect(flattened.data).toEqual(
+      Uint8ClampedArray.of(
+        255, 255, 255, 255,
+        127, 127, 127, 255,
+        40, 80, 120, 255,
+      ),
+    );
+    expect(flattened.colorSpace).toBe("srgb");
+    expect(source.data).toEqual(before);
+  });
+
+  it("feeds the resulting opaque matte pixels to the Offscreen JPEG encoder", async () => {
+    let written: ImageData | undefined;
+    class CapturingOffscreenCanvas {
+      constructor(
+        readonly width: number,
+        readonly height: number,
+      ) {}
+      getContext() {
+        return {
+          putImageData(image: ImageData) {
+            written = image;
+          },
+        };
+      }
+      async convertToBlob() {
+        return new Blob([Uint8Array.of(0xff, 0xd8, 0xff, 0xd9)], {
+          type: "image/jpeg",
+        });
+      }
+    }
+    vi.stubGlobal("OffscreenCanvas", CapturingOffscreenCanvas);
+    vi.stubGlobal("createImageBitmap", vi.fn());
+    try {
+      const adapter = createOffscreenTikTokAdapter();
+      await adapter.encodeJpeg(
+        {
+          width: 1,
+          height: 1,
+          colorSpace: "srgb",
+          data: Uint8ClampedArray.of(200, 10, 20, 0),
+        } as ImageData,
+        { quality: 0.75, matte: [255, 255, 255] },
+      );
+
+      expect(written?.data).toEqual(Uint8ClampedArray.of(255, 255, 255, 255));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("keeps oriented native dimensions, uses sRGB, white matte, and JPEG quality 0.75", async () => {
     const runtime = fakeAdapter();
     const source = new Blob([Uint8Array.of(0xff, 0xd8, 0xff, 1, 2, 3)], {

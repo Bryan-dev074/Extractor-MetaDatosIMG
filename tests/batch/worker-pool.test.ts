@@ -505,13 +505,38 @@ function tiktokResult(): TikTokExportResult {
     approximate: true,
     eligiblePixels: 10,
     eligibleFraction: 0.05,
-    changedSamples: 20,
+    changedSamples: 18,
     sumDelta: 0,
     meanDelta: 0,
   };
 }
 
 describe("TikTok worker protocol", () => {
+  it("falls back cleanly when eager Worker construction is blocked", async () => {
+    const exportOnMainThread = vi.fn().mockResolvedValue(tiktokResult());
+    const createWorker = vi.fn((): ImageWorker => {
+      throw new DOMException("Worker bloqueado por CSP", "SecurityError");
+    });
+
+    const processor = createTikTokProcessor({
+      createWorker,
+      exportOnMainThread,
+    });
+
+    await expect(
+      processor.export(
+        new Blob([Uint8Array.of(1)], { type: "image/png" }),
+        { id: "csp", generation: 1 },
+      ),
+    ).resolves.toMatchObject({ seed: 42 });
+    expect(createWorker).toHaveBeenCalledOnce();
+    expect(exportOnMainThread).toHaveBeenCalledOnce();
+    expect(processor.destroyed).toBe(false);
+
+    processor.destroy();
+    expect(processor.destroyed).toBe(true);
+  });
+
   it("uses a dedicated concurrency-one pool and transfers the input buffer", async () => {
     const factory = workerFactory();
     const pool = createTikTokWorkerPool({ createWorker: factory.createWorker });
@@ -704,6 +729,156 @@ describe("TikTok worker protocol", () => {
     await expect(Promise.all([first, second])).resolves.toHaveLength(2);
     expect(workerPool.tiktok).toHaveBeenCalledTimes(2);
     processor.destroy();
+    expect(workerPool.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a cancelled fallback waiter immediately and permits a new waiter", async () => {
+    const releases: Array<() => void> = [];
+    const started: string[] = [];
+    const workerPool = {
+      tiktok: vi.fn().mockRejectedValue(new TikTokWorkerFallbackError("sin worker")),
+      destroy: vi.fn(),
+    };
+    const processor = createTikTokProcessor({
+      workerPool,
+      async exportOnMainThread(input) {
+        started.push(await input.text());
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return tiktokResult();
+      },
+    });
+    const first = processor.export(new Blob(["first"]), { id: "first", generation: 1 });
+    const cancelledController = new AbortController();
+    const cancelled = processor.export(
+      new Blob(["cancelled"]),
+      { id: "cancelled", generation: 1 },
+      cancelledController.signal,
+    );
+    await vi.waitFor(() => expect(started).toEqual(["first"]));
+
+    let cancelledError: unknown;
+    void cancelled.catch((error: unknown) => {
+      cancelledError = error;
+    });
+    cancelledController.abort("cancel waiter");
+    await vi.waitFor(
+      () => expect(cancelledError).toMatchObject({ name: "AbortError" }),
+      { timeout: 100 },
+    );
+
+    const replacement = processor.export(
+      new Blob(["replacement"]),
+      { id: "replacement", generation: 1 },
+    );
+    expect(started).toEqual(["first"]);
+    releases.shift()?.();
+    await expect(first).resolves.toMatchObject({ seed: 42 });
+    await vi.waitFor(() => expect(started).toEqual(["first", "replacement"]));
+    releases.shift()?.();
+    await expect(replacement).resolves.toMatchObject({ seed: 42 });
+    await expect(cancelled).rejects.toMatchObject({ name: "AbortError" });
+    expect(started).not.toContain("cancelled");
+    processor.destroy();
+  });
+
+  it("rejects active cancellation immediately but holds serial ownership until settle", async () => {
+    const releases: Array<() => void> = [];
+    const started: string[] = [];
+    const workerPool = {
+      tiktok: vi.fn().mockRejectedValue(new TikTokWorkerFallbackError("sin worker")),
+      destroy: vi.fn(),
+    };
+    const processor = createTikTokProcessor({
+      workerPool,
+      async exportOnMainThread(input) {
+        started.push(await input.text());
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return tiktokResult();
+      },
+    });
+    const controller = new AbortController();
+    const first = processor.export(
+      new Blob(["first"]),
+      { id: "first", generation: 1 },
+      controller.signal,
+    );
+    const settlements: string[] = [];
+    void first.then(
+      () => settlements.push("resolved"),
+      () => settlements.push("rejected"),
+    );
+    await vi.waitFor(() => expect(started).toEqual(["first"]));
+
+    controller.abort("cancel active");
+    await vi.waitFor(() => expect(settlements).toEqual(["rejected"]), {
+      timeout: 100,
+    });
+    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+
+    const second = processor.export(new Blob(["second"]), {
+      id: "second",
+      generation: 1,
+    });
+    await Promise.resolve();
+    expect(started).toEqual(["first"]);
+
+    releases.shift()?.();
+    await vi.waitFor(() => expect(started).toEqual(["first", "second"]));
+    expect(settlements).toEqual(["rejected"]);
+    releases.shift()?.();
+    await expect(second).resolves.toMatchObject({ seed: 42 });
+    expect(settlements).toEqual(["rejected"]);
+    processor.destroy();
+  });
+
+  it("destroy rejects active and waiting fallbacks immediately and suppresses late results", async () => {
+    const releases: Array<() => void> = [];
+    const started: string[] = [];
+    const workerPool = {
+      tiktok: vi.fn().mockRejectedValue(new TikTokWorkerFallbackError("sin worker")),
+      destroy: vi.fn(),
+    };
+    const processor = createTikTokProcessor({
+      workerPool,
+      async exportOnMainThread(input) {
+        started.push(await input.text());
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return tiktokResult();
+      },
+    });
+    const first = processor.export(new Blob(["first"]), { id: "first", generation: 1 });
+    const waiting = processor.export(new Blob(["waiting"]), {
+      id: "waiting",
+      generation: 1,
+    });
+    const settlements: string[] = [];
+    void first.then(
+      () => settlements.push("first resolved"),
+      () => settlements.push("first rejected"),
+    );
+    void waiting.then(
+      () => settlements.push("waiting resolved"),
+      () => settlements.push("waiting rejected"),
+    );
+    await vi.waitFor(() => expect(started).toEqual(["first"]));
+
+    processor.destroy();
+    await vi.waitFor(
+      () =>
+        expect(settlements).toEqual([
+          "first rejected",
+          "waiting rejected",
+        ]),
+      { timeout: 100 },
+    );
+    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+    expect(started).toEqual(["first"]);
+
+    releases.shift()?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settlements).toEqual(["first rejected", "waiting rejected"]);
     expect(workerPool.destroy).toHaveBeenCalledOnce();
   });
 });

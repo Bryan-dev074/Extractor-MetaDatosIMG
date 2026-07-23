@@ -21,6 +21,33 @@ const REMOVED_COLOR_CHUNKS = new Set([
 ]);
 const KNOWN_CRITICAL = new Set(["IHDR", "PLTE", "IDAT", "IEND"]);
 const APNG_CHUNKS = new Set(["acTL", "fcTL", "fdAT"]);
+const BEFORE_PLTE_AND_IDAT = new Set([
+  "cHRM",
+  "cICP",
+  "gAMA",
+  "iCCP",
+  "mDCV",
+  "cLLI",
+  "sBIT",
+  "sRGB",
+]);
+const BEFORE_IDAT = new Set([
+  ...BEFORE_PLTE_AND_IDAT,
+  "bKGD",
+  "eXIf",
+  "hIST",
+  "pHYs",
+  "sPLT",
+  "tRNS",
+]);
+const PRESERVED_SINGLETON_CHUNKS = new Set([
+  "bKGD",
+  "hIST",
+  "pHYs",
+  "sBIT",
+  "tIME",
+  "tRNS",
+]);
 
 function uint32(value: number): Uint8Array {
   return Uint8Array.of(value >>> 24, value >>> 16, value >>> 8, value);
@@ -82,11 +109,15 @@ export function parseTikTokPng(
   let offset = 8;
   let width = 0;
   let height = 0;
+  let colorType = -1;
+  let paletteEntries = 0;
   let sawIhdr = false;
   let sawPlte = false;
   let sawIdat = false;
   let leftIdatRun = false;
   let sawIend = false;
+  let sawPaletteDependent = false;
+  const singletonChunks = new Set<string>();
 
   while (offset < bytes.length) {
     if (chunks.length >= 100_000) throw new Error("PNG contiene demasiados chunks.");
@@ -116,8 +147,15 @@ export function parseTikTokPng(
     if (APNG_CHUNKS.has(type)) {
       throw new Error("APNG animado no es compatible con TikTok Photo Max.");
     }
-    if (sawIdat && REMOVED_COLOR_CHUNKS.has(type)) {
-      throw new Error(`El chunk ${type} aparece después de IDAT.`);
+    if (sawIdat && BEFORE_IDAT.has(type)) {
+      throw new Error(`El chunk ${type} debe aparecer antes de IDAT.`);
+    }
+    if (sawPlte && BEFORE_PLTE_AND_IDAT.has(type)) {
+      throw new Error(`El chunk ${type} debe aparecer antes de PLTE.`);
+    }
+    if (PRESERVED_SINGLETON_CHUNKS.has(type)) {
+      if (singletonChunks.has(type)) throw new Error(`Chunk PNG ${type} duplicado.`);
+      singletonChunks.add(type);
     }
 
     if (type === "IHDR") {
@@ -129,7 +167,8 @@ export function parseTikTokPng(
         throw new Error("Dimensiones PNG inválidas.");
       }
       if (data[8] !== 8) throw new Error("TikTok Photo Max requiere PNG de 8 bits.");
-      if (data[9] !== 2 && data[9] !== 6) {
+      colorType = data[9];
+      if (colorType !== 2 && colorType !== 6) {
         throw new Error("TikTok Photo Max requiere PNG RGB o RGBA.");
       }
       if (data[10] !== 0 || data[11] !== 0 || (data[12] !== 0 && data[12] !== 1)) {
@@ -137,11 +176,37 @@ export function parseTikTokPng(
       }
       sawIhdr = true;
     } else if (type === "PLTE") {
-      if (sawPlte || sawIdat) throw new Error("Orden PLTE inválido.");
+      if (sawPlte || sawIdat || sawPaletteDependent) {
+        throw new Error("Orden PLTE inválido.");
+      }
       if (length === 0 || length % 3 !== 0 || length > 768) {
         throw new Error("PLTE inválido.");
       }
       sawPlte = true;
+      paletteEntries = length / 3;
+    } else if (type === "bKGD") {
+      if (length !== 6) throw new Error("bKGD RGB inválido.");
+      sawPaletteDependent = true;
+    } else if (type === "tRNS") {
+      if (colorType === 6) throw new Error("tRNS no es válido para PNG RGBA.");
+      if (length !== 6) throw new Error("tRNS RGB inválido.");
+      sawPaletteDependent = true;
+    } else if (type === "hIST") {
+      if (!sawPlte) throw new Error("hIST requiere un PLTE anterior.");
+      if (length !== paletteEntries * 2) {
+        throw new Error("hIST debe contener una entrada por cada color PLTE.");
+      }
+      sawPaletteDependent = true;
+    } else if (type === "pHYs") {
+      if (length !== 9) throw new Error("pHYs inválido.");
+    } else if (type === "sBIT") {
+      const expectedLength = colorType === 2 ? 3 : 4;
+      if (
+        length !== expectedLength ||
+        data.some((value) => value < 1 || value > 8)
+      ) {
+        throw new Error("sBIT inválido para el tipo de color PNG.");
+      }
     } else if (type === "IDAT") {
       if (leftIdatRun) throw new Error("Los chunks IDAT deben ser contiguos.");
       sawIdat = true;
