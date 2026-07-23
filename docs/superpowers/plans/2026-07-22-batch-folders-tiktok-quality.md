@@ -680,7 +680,7 @@ useEffect(() => {
 
 Create preview URLs only after an IntersectionObserver marks a result within roughly 250px of the viewport. Revoke them on invisibility/removal/reset/unmount. Bound initial rendering to roughly 60 dense path-led result rows with explicit load-more and `content-visibility: auto`, rather than an equal-card grid. The TikTok button labels output as `PNG sRGB · anti-parches adaptativo`; clean output labels `Píxeles 1:1 · sin recomprimir`. TikTok batch generation is explicit and sequential.
 
-Replace the old marketing hero, glassmorphism/auroras, continuous canvas, and decorative gradients with a dark prepress workbench: quiet layered surfaces, monospace path/byte proof, proof green only for verified lossless output, scan cyan for progress, and rose only for the TikTok output rail. Remove every `lib/optimize.ts` consumer and the legacy fixed-size JPEG claims.
+Preserve and faithfully evolve the original premium identity: hero, logo, violet/cyan/fuchsia auroras, glass surfaces, gradient accents, feature row, background grid, and result-card character. New folder, progress, ZIP, and dual clean/TikTok controls must look native to that same visual system, not like a replacement dashboard. Keep ambient motion but bound its complexity and pause/simplify it for reduced motion, hidden tabs, and heavy processing. Remove every `lib/optimize.ts` consumer and the legacy fixed-size JPEG claims.
 
 Add a skip link, semantic `<progress>` plus visible tabular counts, `aria-live` summaries, actionable `role="alert"` errors, complete accessible names, visible focus, 44px targets, deep-path wrapping, reduced-motion behavior, and retained actions at 360x800/390x844 and 200% zoom.
 
